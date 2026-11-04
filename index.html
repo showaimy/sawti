@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>صوتي — تحويل النص إلى صوت داخل متصفحك</title>
+  <meta name="description" content="حوّل النص إلى صوت مباشرة في متصفحك، بأصوات عالية الجودة أو بصوتك أنت، بدون سيرفر وبدون اشتراك." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23C2410C'/%3E%3Cpath d='M9 13v6M13 10v12M17 8v16M21 11v10M25 14v4' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script type="module" crossorigin src="./assets/index-1f0Iga7O.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-C0R78nVq.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><path d="M9 13v6M13 10v12M17 8v16M21 11v10M25 14v4" /></svg>
+      </span>
+      <div>
+        <h1>صوتي</h1>
+        <p class="tag">النص يتحوّل إلى صوت داخل جهازك، بدون سيرفر</p>
+      </div>
+    </div>
+    <span class="badge" title="بعد أول تنزيل يشتغل بدون إنترنت">يعمل على جهازك</span>
+  </header>
+
+  <main class="layout">
+    <section class="panel compose" aria-labelledby="composeTitle">
+      <h2 id="composeTitle" class="sr-only">اكتب النص</h2>
+      <div class="selected-voice" id="selectedVoice"></div>
+      <label for="script" class="label">النص</label>
+      <textarea id="script" dir="auto" rows="9" placeholder="اكتب النص اللي تبيه يتحوّل لصوت..."></textarea>
+      <div class="row meta">
+        <span id="charCount">0 حرف</span>
+        <button type="button" class="link" id="sampleBtn">جرّب نصاً تجريبياً</button>
+      </div>
+      <p class="hint" id="arHint">للنطق الأدق في العربي: أضف التشكيل للكلمات اللي ممكن تنقرأ بأكثر من طريقة.</p>
+
+      <div class="controls">
+        <div class="control" data-engine="hq">
+          <label for="language" class="label">لغة الكلام</label>
+          <select id="language"></select>
+        </div>
+        <div class="control" data-engine="hq">
+          <label for="exaggeration" class="label">قوة التعبير <output id="exaggerationOut">متوسط</output></label>
+          <input type="range" id="exaggeration" min="0.25" max="1.5" step="0.05" value="0.5" />
+        </div>
+        <div class="control" data-engine="fast">
+          <label for="speed" class="label">السرعة <output id="speedOut">1.0×</output></label>
+          <input type="range" id="speed" min="0.6" max="1.6" step="0.1" value="1" />
+        </div>
+        <div class="control" data-engine="fast">
+          <label for="pause" class="label">الوقفة بين الجمل <output id="pauseOut">250 ملي ثانية</output></label>
+          <input type="range" id="pause" min="0" max="1000" step="50" value="250" />
+        </div>
+      </div>
+
+      <button type="button" class="primary" id="generateBtn"><span class="btn-label">ولّد الصوت</span></button>
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><span id="progressBar"></span></div>
+        <p id="progressText" aria-live="polite"></p>
+      </div>
+      <p class="error" id="errorBox" role="alert" hidden></p>
+
+      <div class="result" id="result" hidden>
+        <audio id="player" controls></audio>
+        <div class="row">
+          <a class="secondary" id="downloadLink" download="sawti.wav">تنزيل الملف (WAV)</a>
+          <span class="muted" id="resultMeta"></span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel voices" aria-labelledby="voicesTitle">
+      <h2 id="voicesTitle">الأصوات</h2>
+      <div class="tabs" role="tablist" aria-label="نوع الصوت">
+        <button type="button" role="tab" class="tab" id="tabHq" data-tab="hq" aria-selected="true">عالية الجودة</button>
+        <button type="button" role="tab" class="tab" id="tabFast" data-tab="fast" aria-selected="false">سريعة</button>
+      </div>
+
+      <div id="paneHq" role="tabpanel" aria-labelledby="tabHq">
+        <p class="note" id="hqNote">تتكلم 23 لغة منها العربي، وتقدر تضيف صوتك. تحتاج كمبيوتر فيه كرت شاشة.</p>
+        <p class="warn" id="hqWarn" hidden></p>
+        <ul class="voice-list" id="hqList" role="radiogroup" aria-label="الأصوات عالية الجودة"></ul>
+        <button type="button" class="secondary full" id="addVoiceBtn">+ أضف صوتك</button>
+
+        <form class="add-voice" id="addVoiceForm" hidden novalidate>
+          <h3>صوت جديد</h3>
+          <label class="label" for="voiceName">اسم الصوت</label>
+          <input type="text" id="voiceName" maxlength="30" placeholder="مثلاً: صوتي" />
+          <p class="muted small">ارفع مقطع أو سجّل من 10 إلى 30 ثانية: كلام واضح، صوت واحد، بدون موسيقى أو ضجة.</p>
+          <div class="row gap">
+            <label class="secondary file-btn">رفع ملف صوت<input type="file" id="voiceFile" accept="audio/*" hidden /></label>
+            <button type="button" class="secondary" id="recordBtn">تسجيل من المايك</button>
+          </div>
+          <p class="record-hint" id="recordHint" hidden>اقرأ بصوت طبيعي: «أهلاً وسهلاً، هذا تسجيل لصوتي عشان أستخدمه في تحويل النصوص إلى كلام. أتكلم بهدوء ووضوح، وبنفس الطريقة اللي أتكلم فيها كل يوم.»</p>
+          <audio id="voicePreview" controls hidden></audio>
+          <p class="muted small" id="clipInfo"></p>
+          <label class="check"><input type="checkbox" id="consent" /> هذا صوتي، أو عندي إذن صاحب الصوت يستخدمه.</label>
+          <p class="error" id="voiceError" hidden></p>
+          <div class="row gap">
+            <button type="submit" class="primary small-btn" id="saveVoiceBtn">احفظ الصوت</button>
+            <button type="button" class="link" id="cancelVoiceBtn">إلغاء</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="paneFast" role="tabpanel" aria-labelledby="tabFast" hidden>
+        <p class="note">أخف وأسرع، وتشتغل حتى على الجوال. كل صوت يتكلم لغته بس.</p>
+        <div class="filters" aria-label="اللغة">
+          <button type="button" class="chip" data-lang="ar" aria-pressed="true">عربي</button>
+          <button type="button" class="chip" data-lang="en" aria-pressed="false">إنجليزي</button>
+        </div>
+        <ul class="voice-list" id="fastList" role="radiogroup" aria-label="الأصوات السريعة"></ul>
+        <p class="muted small">كل صوت يتنزّل مرة وحدة (حوالي 60 ميجا).</p>
+      </div>
+    </aside>
+
+    <section class="panel history" aria-labelledby="historyTitle">
+      <div class="row">
+        <h2 id="historyTitle">السجل</h2>
+        <button type="button" class="link" id="clearHistory">مسح الكل</button>
+      </div>
+      <ul class="history-list" id="historyList"></ul>
+      <p class="empty" id="historyEmpty">ما فيه توليدات للحين. أول صوت تولّده يظهر هنا.</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>كل شيء يصير داخل متصفحك، والنص والأصوات ما تطلع من جهازك. الأصوات عالية الجودة من Chatterbox Multilingual (Resemble AI)، والسريعة من مشروع Piper. الاثنين برخصة MIT.</p>
+  </footer>
+
+</body>
+</html>

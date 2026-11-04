@@ -1,0 +1,21 @@
+{
+  "name": "sawt",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@diffusionstudio/piper-wasm": "^1.0.0",
+    "@huggingface/transformers": "^4.3.2",
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
+    "onnxruntime-web": "^1.18.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.21"
+  }
+}
