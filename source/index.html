@@ -52,12 +52,23 @@
         <span id="charCount">0 حرف</span>
         <button type="button" class="link" id="sampleBtn">جرّب نصاً تجريبياً</button>
       </div>
-      <p class="hint" id="arHint">للنطق الأدق في العربي: أضف التشكيل للكلمات اللي ممكن تنقرأ بأكثر من طريقة.</p>
+      <p class="hint" id="arHint">للنطق الأدق: اكتب الكلام مثل ما ينقال، وحط التشكيل على الكلمات اللي ممكن تنقرأ بأكثر من طريقة. الأرقام تنقرأ تلقائياً.</p>
 
       <div class="controls">
         <div class="control">
           <label for="language" class="label">لغة الكلام</label>
           <select id="language"></select>
+        </div>
+        <div class="control" id="dialectControl">
+          <label for="dialect" class="label">اللهجة</label>
+          <select id="dialect">
+            <option value="saudi">سعودية</option>
+            <option value="msa">فصحى</option>
+          </select>
+        </div>
+        <div class="control">
+          <label for="style" class="label">أسلوب الكلام</label>
+          <select id="style"></select>
         </div>
         <div class="control">
           <label for="exaggeration" class="label">قوة التعبير <output id="exaggerationOut">متوسط</output></label>

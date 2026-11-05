@@ -1,5 +1,5 @@
 import { splitText, encodeWav, cleanupOldDownloads } from './utils.js';
-import { LANGUAGES, DEFAULT_VOICE, PRESETS, isConnected, connect, disconnect, synthesize, forgetVoice } from './server.js';
+import { LANGUAGES, STYLES, DEFAULT_VOICE, PRESETS, isConnected, connect, disconnect, synthesize, forgetVoice } from './server.js';
 import { decodeToMono, tidyClip, Recorder } from './audio.js';
 import * as store from './store.js';
 
@@ -9,6 +9,7 @@ const els = {
   connectedBar: $('connectedBar'), changePass: $('changePass'),
   selectedVoice: $('selectedVoice'), script: $('script'), charCount: $('charCount'), sampleBtn: $('sampleBtn'), arHint: $('arHint'),
   language: $('language'), exaggeration: $('exaggeration'), exaggerationOut: $('exaggerationOut'),
+  dialect: $('dialect'), dialectControl: $('dialectControl'), style: $('style'),
   generate: $('generateBtn'), progress: $('progress'), bar: $('progressBar'), progressText: $('progressText'),
   error: $('errorBox'), result: $('result'), player: $('player'), download: $('downloadLink'), resultMeta: $('resultMeta'),
   voiceList: $('voiceList'), addVoiceBtn: $('addVoiceBtn'),
@@ -18,11 +19,13 @@ const els = {
 };
 
 const SAMPLES = {
+  saudi: 'يا هلا والله! هذا صوت سعودي مولّد بالذكاء الاصطناعي، تكتب أي نص وأقرأه لك بأسلوب طبيعي. وعندنا خصم 25% لين نهاية الشهر، لا يفوتك!',
   ar: 'السَّلامُ عليكم. هذا صوتٌ تمَّ توليدُه بالذكاءِ الاصطناعي، ويقدرُ يقرأ أيَّ نصٍّ تكتبه.',
   en: 'Hello! This voice was generated with AI, and it can read any text you write.',
   other: 'Hello! This voice was generated with AI.',
 };
 const SAMPLE_LINES = {
+  saudi: 'هلا والله، هذا صوتي. أقدر أقرأ لك أي نص تبيه، بوضوح وبإحساس.',
   ar: 'أهلاً وسهلاً، هذا صوتي. أقدر أقرأ لك أي نص تبيه بوضوح وهدوء.',
   en: 'Hi there, this is my voice. I can read any text you like, clearly and calmly.',
   other: 'Hello, this is my voice. I can read any text you like.',
@@ -32,10 +35,15 @@ const SAMPLE_LINES = {
 const prefs = store.loadPrefs();
 let selectedId = prefs.voiceId || PRESETS[0].id;
 let lang = prefs.hqLang || 'ar';
+let dialect = prefs.dialect === 'msa' ? 'msa' : 'saudi';
+let styleId = STYLES.some((x) => x.id === prefs.style) ? prefs.style : STYLES[0].id;
 let myVoices = [];
 let busy = false;
 let currentUrl = null;
-const savePrefs = () => store.savePrefs({ voiceId: selectedId, hqLang: lang });
+const savePrefs = () => store.savePrefs({ voiceId: selectedId, hqLang: lang, dialect, style: styleId });
+const styleById = (id) => STYLES.find((x) => x.id === id) || STYLES[0];
+// text key for samples: Saudi Arabic has its own lines
+const textKey = () => (lang === 'ar' && dialect === 'saudi' ? 'saudi' : lang);
 
 const voiceById = (id) => (id === DEFAULT_VOICE.id ? DEFAULT_VOICE : PRESETS.find((v) => v.id === id) || myVoices.find((v) => v.id === id));
 const langLabel = (code) => LANGUAGES.find(([c]) => c === code)?.[1] || code;
@@ -83,6 +91,21 @@ for (const [code, label] of LANGUAGES) {
 }
 els.language.value = lang;
 els.language.addEventListener('change', () => { lang = els.language.value; savePrefs(); renderCompose(); });
+
+// ---------- dialect + speaking style ----------
+els.dialect.value = dialect;
+els.dialect.addEventListener('change', () => { dialect = els.dialect.value === 'msa' ? 'msa' : 'saudi'; savePrefs(); renderCompose(); });
+for (const st of STYLES) {
+  const o = document.createElement('option');
+  o.value = st.id; o.textContent = st.name;
+  els.style.append(o);
+}
+els.style.value = styleId;
+function applyStyle() {
+  els.exaggeration.value = styleById(styleId).exaggeration;
+  els.exaggeration.dispatchEvent(new Event('input'));
+}
+els.style.addEventListener('change', () => { styleId = els.style.value; savePrefs(); applyStyle(); });
 
 // ---------- voice list ----------
 function voiceRow({ id, name, desc, onDelete }) {
@@ -141,8 +164,9 @@ function renderCompose() {
   const v = voiceById(selectedId) || PRESETS[0];
   els.selectedVoice.innerHTML = '<span class="sv-label">الصوت:</span> <strong></strong> <span class="muted"></span>';
   els.selectedVoice.querySelector('strong').textContent = v.name;
-  els.selectedVoice.querySelector('.muted').textContent = `· يتكلم ${langLabel(lang)}`;
+  els.selectedVoice.querySelector('.muted').textContent = `· يتكلم ${lang === 'ar' ? (dialect === 'saudi' ? 'باللهجة السعودية' : 'بالفصحى') : langLabel(lang)}`;
   els.arHint.hidden = lang !== 'ar';
+  els.dialectControl.hidden = lang !== 'ar';
 }
 
 function renderAll() { renderVoices(); renderCompose(); renderConnection(); }
@@ -153,7 +177,7 @@ function updateCount() {
   store.saveDraft(els.script.value);
 }
 els.script.addEventListener('input', updateCount);
-els.sampleBtn.addEventListener('click', () => { els.script.value = SAMPLES[lang] || SAMPLES.other; updateCount(); els.script.focus(); });
+els.sampleBtn.addEventListener('click', () => { els.script.value = SAMPLES[textKey()] || SAMPLES.other; updateCount(); els.script.focus(); });
 const exaggerationLabel = (x) => (x < 0.4 ? 'هادئ' : x <= 0.65 ? 'متوسط' : x <= 1 ? 'معبّر' : 'معبّر جداً');
 els.exaggeration.addEventListener('input', () => { els.exaggerationOut.textContent = exaggerationLabel(Number(els.exaggeration.value)); });
 
@@ -213,12 +237,16 @@ els.generate.addEventListener('click', async () => {
   if (text.length > 20000) { showError('النص طويل جداً. قسّمه لأجزاء أقصر من 20,000 حرف.'); return; }
   const voice = voiceById(selectedId) || PRESETS[0];
   const exaggeration = Number(els.exaggeration.value);
+  const st = styleById(styleId);
   setBusy(true, 'أجهّز الطلب...');
   try {
-    const out = await synthesize({ chunks: splitText(text, 220), language: lang, voice, exaggeration }, showProgress);
+    const out = await synthesize({
+      chunks: splitText(text, 220), language: lang, voice, exaggeration,
+      cfgWeight: st.cfgWeight, temperature: st.temperature, dialect,
+    }, showProgress);
     showResult(out.blob, `${voice.name} · ${formatSeconds(out.seconds)}`);
     els.player.play().catch(() => {});
-    await store.addHistory({ text, voiceId: voice.id, voiceName: voice.name, engine: 'hq', language: lang, exaggeration, seconds: out.seconds, blob: out.blob, createdAt: Date.now() });
+    await store.addHistory({ text, voiceId: voice.id, voiceName: voice.name, engine: 'hq', language: lang, dialect, style: styleId, exaggeration, seconds: out.seconds, blob: out.blob, createdAt: Date.now() });
     renderHistory();
   } catch (e) {
     console.error(e);
@@ -250,7 +278,7 @@ function playSample(blob, name) {
     els.result.scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 }
-async function sampleCache() { try { return await caches.open('sawt-samples-v2'); } catch { return null; } }
+async function sampleCache() { try { return await caches.open('sawt-samples-v3'); } catch { return null; } }
 const sampleKey = (id, l) => `https://sawt.local/sample/${encodeURIComponent(id)}/${l}`;
 
 async function previewVoice(id, btn) {
@@ -258,7 +286,7 @@ async function previewVoice(id, btn) {
   unlockPreview(); // inside the tap, before any await (iPhone)
   const voice = voiceById(id);
   const cache = await sampleCache();
-  const key = sampleKey(id, lang);
+  const key = sampleKey(id, textKey());
   const hit = cache && await cache.match(key);
   if (hit) { playSample(await hit.blob(), voice.name); return; }
   if (!isConnected()) { showError(friendlyError('SERVER_NOT_CONNECTED')); els.pass.focus(); return; }
@@ -267,7 +295,7 @@ async function previewVoice(id, btn) {
   showError('');
   setBusy(true, 'أجهّز عيّنة الصوت...');
   try {
-    const out = await synthesize({ chunks: [SAMPLE_LINES[lang] || SAMPLE_LINES.other], language: lang, voice, exaggeration: 0.5 }, showProgress);
+    const out = await synthesize({ chunks: [SAMPLE_LINES[textKey()] || SAMPLE_LINES.other], language: lang, voice, exaggeration: 0.5, dialect }, showProgress);
     if (cache) { try { await cache.put(key, new Response(out.blob, { headers: { 'content-type': 'audio/wav' } })); } catch { /* storage full */ } }
     playSample(out.blob, voice.name);
   } catch (e) {
@@ -392,12 +420,14 @@ async function renderHistory() {
     li.querySelector('audio').src = url;
     const a = li.querySelector('.dl');
     a.href = url; a.download = `sawti-${it.id}.wav`;
-    const extra = it.language ? ` · ${langLabel(it.language)}` : '';
+    const extra = it.language ? ` · ${it.language === 'ar' && it.dialect ? (it.dialect === 'saudi' ? 'سعودي' : 'فصحى') : langLabel(it.language)}` : '';
     li.querySelector('.when').textContent = `${name}${extra} · ${formatSeconds(it.seconds)} · ${new Date(it.createdAt).toLocaleString('ar', { dateStyle: 'medium', timeStyle: 'short' })}`;
     li.querySelector('.reuse').addEventListener('click', () => {
       els.script.value = it.text; updateCount();
       if (voiceById(it.voiceId)) selectedId = it.voiceId;
       if (it.language) { lang = it.language; els.language.value = lang; }
+      if (it.dialect) { dialect = it.dialect; els.dialect.value = dialect; }
+      if (it.style && STYLES.some((x) => x.id === it.style)) { styleId = it.style; els.style.value = styleId; }
       if (it.exaggeration) { els.exaggeration.value = it.exaggeration; els.exaggeration.dispatchEvent(new Event('input')); }
       savePrefs(); renderAll();
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -426,6 +456,7 @@ async function start() {
   updateCount();
   myVoices = await store.listVoices();
   if (!voiceById(selectedId)) selectedId = PRESETS[0].id;
+  applyStyle();
   renderAll();
   renderHistory();
 }

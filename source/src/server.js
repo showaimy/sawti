@@ -11,6 +11,15 @@ export const LANGUAGES = [
   ['he', 'العبرية'], ['ms', 'الماليزية'], ['sw', 'السواحيلية'],
 ];
 
+// Speaking styles, from Resemble AI's Chatterbox guidance: more expression with a lower pacing
+// weight sounds livelier; a lower temperature keeps explainers steady.
+export const STYLES = [
+  { id: 'natural', name: 'طبيعي', exaggeration: 0.5, cfgWeight: 0.5, temperature: 0.8 },
+  { id: 'ad', name: 'إعلان حماسي', exaggeration: 0.8, cfgWeight: 0.3, temperature: 0.85 },
+  { id: 'explain', name: 'شرح هادئ وواضح', exaggeration: 0.4, cfgWeight: 0.5, temperature: 0.7 },
+  { id: 'story', name: 'معبّر جداً (قصص ومشاعر)', exaggeration: 1.1, cfgWeight: 0.3, temperature: 0.9 },
+];
+
 export const DEFAULT_VOICE = { id: 'hq-default', name: 'الصوت الافتراضي', desc: 'صوت النموذج الأساسي' };
 
 // Ready-made voices live on the server (built there from open Piper voices). Ids match server/app.py.
@@ -121,9 +130,11 @@ async function voiceKeyFor(voice, onProgress) {
 
 /**
  * Generates speech on the server, one sentence group per request.
- * @param {{chunks:string[], language:string, voice:object, exaggeration:number}} o
+ * @param {{chunks:string[], language:string, voice:object, exaggeration:number,
+ *   cfgWeight?:number, temperature?:number, dialect?:'saudi'|'msa'}} o
+ * Arabic with dialect 'saudi' uses the server's Saudi-dialect model.
  */
-export async function synthesize({ chunks, language, voice, exaggeration }, onProgress) {
+export async function synthesize({ chunks, language, voice, exaggeration, cfgWeight = 0.5, temperature = 0.8, dialect = 'saudi' }, onProgress) {
   if (!password) throw new Error('SERVER_NOT_CONNECTED');
   let key = await voiceKeyFor(voice, onProgress);
   const parts = [];
@@ -133,7 +144,7 @@ export async function synthesize({ chunks, language, voice, exaggeration }, onPr
     const send = () => request('/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: chunks[i], language, exaggeration, voice_key: key }),
+      body: JSON.stringify({ text: chunks[i], language, exaggeration, cfg_weight: cfgWeight, temperature, dialect, voice_key: key }),
     });
     let res = await send();
     if (res.status === 404) {

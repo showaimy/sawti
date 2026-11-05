@@ -11,7 +11,9 @@ Auth: every endpoint except /health needs  Authorization: Bearer <encodeURICompo
   POST /voice    -> {"voice_key": "u-..."}      body: {"ref_audio": "<base64 wav/mp3/m4a>"}
                     Stores a custom voice once (kept across restarts), so later requests send only the key.
   POST /tts      -> audio/wav                    body: {"text": "...", "language": "ar",
-                    "voice_key": "default" | "<preset id>" | "u-...", "exaggeration": 0.5, "cfg_weight": 0.5}
+                    "voice_key": "default" | "<preset id>" | "u-...", "exaggeration": 0.5, "cfg_weight": 0.5,
+                    "temperature": 0.8, "dialect": "saudi" | "msa"}
+                    Arabic + dialect "saudi" uses the Saudi-dialect model (NAMAA-Saudi-TTS) when available.
                     One sentence group per request keeps each call well under the web timeout.
                     404 {"detail": "unknown voice"} means: upload the voice again with /voice.
 
@@ -30,12 +32,14 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173",
 ]
 MAX_TEXT_CHARS = 600
+SAUDI_REPO = "NAMAA-Space/NAMAA-Saudi-TTS"
 MAX_REF_BYTES = 8 * 1024 * 1024
 
 # Ready-made voices: each one is read once by an open Piper voice when the image is built,
 # and Chatterbox then speaks any of its 23 languages in that voice. Ids match the website.
 REF_AR = "السلامُ عليكم ورحمةُ الله. أهلاً وسهلاً بكم. اليومَ نتحدّثُ عن أهميةِ التخطيطِ الجيّد، وكيف يساعدُنا على إنجازِ أعمالِنا بهدوءٍ ووضوح. خذوا وقتَكم، واستمتعوا بالرحلة."
 REF_EN = "Hello, and welcome. Today we are talking about the value of good planning, and how it helps us finish our work calmly and clearly. Take your time, breathe, and enjoy the journey ahead of you."
+PRESET_LANG = {"hq-p-kareem": "ar"}  # all other presets were recorded in English
 PRESETS = {
     "hq-p-kareem": ("ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx", REF_AR),
     "hq-p-hannah": ("en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx", REF_EN),
@@ -45,6 +49,105 @@ PRESETS = {
     "hq-p-alba": ("en/en_GB/alba/medium/en_GB-alba-medium.onnx", REF_EN),
     "hq-p-alan": ("en/en_GB/alan/medium/en_GB-alan-medium.onnx", REF_EN),
 }
+
+
+# ---------- Arabic numbers -> words ----------
+# The Saudi model reads digits poorly (its model card says so), so numbers are spelled out first.
+_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬٪", "01234567890123456789.,%")
+_ONES = ["", "واحد", "اثنين", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة"]
+_TENS = ["", "عشرة", "عشرين", "ثلاثين", "أربعين", "خمسين", "ستين", "سبعين", "ثمانين", "تسعين"]
+_SHORT = ["", "", "", "ثلاث", "أربع", "خمس", "ست", "سبع", "ثمان", "تسع", "عشر"]
+_FULL = ["", "", "", "ثلاثة", "أربعة", "خمسة", "ستة", "سبعة", "ثمانية", "تسعة", "عشرة"]
+_SCALES = ((10**9, "مليار", "مليارين", "مليارات"), (10**6, "مليون", "مليونين", "ملايين"), (1000, "ألف", "ألفين", "آلاف"))
+
+
+def _under_100(n):
+    if n < 10:
+        return _ONES[n]
+    if n == 10:
+        return "عشرة"
+    if n == 11:
+        return "أحد عشر"
+    if n == 12:
+        return "اثنا عشر"
+    if n < 20:
+        return _ONES[n - 10] + " عشر"
+    t, o = divmod(n, 10)
+    return f"{_ONES[o]} و{_TENS[t]}" if o else _TENS[t]
+
+
+def _under_1000(n, saudi):
+    h, r = divmod(n, 100)
+    parts = []
+    if h == 1:
+        parts.append("مية" if saudi else "مئة")
+    elif h == 2:
+        parts.append("ميتين" if saudi else "مئتين")
+    elif h:
+        parts.append(f"{_SHORT[h]} مية" if saudi else f"{_SHORT[h]}مئة")
+    if r:
+        parts.append(_under_100(r))
+    return " و".join(parts)
+
+
+def number_words(n, saudi=True):
+    if n == 0:
+        return "صفر"
+    out = []
+    for value, one, two, plural in _SCALES:
+        q, n = divmod(n, value)
+        if q == 1:
+            out.append(one)
+        elif q == 2:
+            out.append(two)
+        elif 3 <= q <= 10:
+            out.append(f"{(_SHORT if saudi else _FULL)[q]} {plural}")
+        elif q:
+            out.append(f"{number_words(q, saudi)} {one}")
+    if n:
+        out.append(_under_1000(n, saudi))
+    return " و".join(out)
+
+
+def _digits_one_by_one(s):
+    return " ".join("صفر" if d == "0" else _ONES[int(d)] for d in s)
+
+
+def spell_numbers_ar(text, saudi=True):
+    """'خصم 25% على 1,500 ريال الساعة 10:30' -> words. Phone-like numbers are read digit by digit."""
+    import re
+
+    text = text.translate(_DIGITS)
+    percent = "بالمية" if saudi else "بالمئة"
+
+    def time(m):
+        h, mi = int(m.group(1)), int(m.group(2))
+        if mi == 0:
+            return number_words(h, saudi)
+        if mi == 30 and saudi:
+            return f"{number_words(h, saudi)} ونص"
+        return f"{number_words(h, saudi)} و{number_words(mi, saudi)}"
+
+    def num(m):
+        whole, frac, pct = m.group(1).replace(",", ""), m.group(2), m.group(3)
+        if (len(whole) > 1 and whole.startswith("0")) or len(whole) > 12:
+            words = _digits_one_by_one(whole)
+        else:
+            words = number_words(int(whole), saudi)
+        if frac:
+            frac_words = number_words(int(frac), saudi) if len(frac) <= 2 and not frac.startswith("0") else _digits_one_by_one(frac)
+            words += f" فاصلة {frac_words}"
+        if pct:
+            words += f" {percent}"
+        src, a, b = m.string, m.start(), m.end()
+        # keep one-letter prefixes attached (و13 -> وثلاثة عشر), otherwise keep words apart
+        prefix = a >= 1 and src[a - 1].isalpha() and (src[a - 1] not in "وبلكف" or (a >= 2 and src[a - 2].isalpha()))
+        suffix = b < len(src) and src[b].isalpha()
+        return (" " if prefix else "") + words + (" " if suffix else "")
+
+    text = re.sub(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d:])", time, text)
+    text = re.sub(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s?(%)?", num, text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def download_weights():
@@ -59,6 +162,11 @@ def download_weights():
             "grapheme_mtl_merged_expanded_v1.json", "conds.pt", "Cangjie5_TC.json",
         ],
     )
+    # Saudi-dialect speech model (NAMAA Community, MIT): same architecture, Saudi-tuned T3 weights.
+    try:
+        snapshot_download(repo_id=SAUDI_REPO, repo_type="model", revision="main", allow_patterns=["t3_mtl23ls_v2.safetensors"])
+    except Exception as e:  # keep building; the server then runs without the Saudi engine
+        print("Saudi weights FAILED:", repr(e))
 
 
 def make_preset_refs():
@@ -113,12 +221,39 @@ class TTS:
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
         self.model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
+        self.t3_base = self.model.t3
+        self.t3_saudi = self._load_saudi_t3()
         # Keep references only: Chatterbox's voice tensors cannot be deep-copied. generate() replaces
         # conds.t3 when the expression level changes, so each request works on a shallow copy.
         self.default_conds = self.model.conds
         self.cond_cache = {}
         self.lock = threading.Lock()  # the model keeps per-voice state: one generation at a time
         self.presets = sorted(k for k in PRESETS if os.path.exists(f"{REF_DIR}/{k}.wav"))
+
+    def _load_saudi_t3(self):
+        """Loads NAMAA's Saudi-dialect T3 next to the base one. Returns None if unavailable."""
+        try:
+            from pathlib import Path
+            from huggingface_hub import snapshot_download
+            from safetensors.torch import load_file
+            from chatterbox.models.t3 import T3
+            from chatterbox.models.t3.modules.t3_config import T3Config
+
+            ckpt = Path(snapshot_download(repo_id=SAUDI_REPO, repo_type="model", revision="main",
+                                          allow_patterns=["t3_mtl23ls_v2.safetensors"], local_files_only=True))
+            state = load_file(str(ckpt / "t3_mtl23ls_v2.safetensors"))
+            if "model" in state.keys():
+                state = state["model"][0]
+            t3 = T3(T3Config.multilingual())
+            t3.load_state_dict(state)
+            t3.to("cuda").eval()
+            print("Saudi engine ready")
+            return t3
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print("Saudi engine unavailable:", repr(e))
+            return None
 
     # ---------- voices ----------
     def _ref_bytes(self, voice_key):
@@ -162,15 +297,25 @@ class TTS:
         self.cond_cache[voice_key] = self.model.conds
         self.model.conds = copy.copy(self.model.conds)
 
-    def synthesize(self, text, language, exaggeration, cfg_weight, voice_key):
+    def synthesize(self, text, language, exaggeration, cfg_weight, voice_key, dialect="saudi", temperature=0.8):
         import io
         import numpy as np
         import soundfile as sf
 
         ref = self._ref_bytes(voice_key)  # KeyError -> unknown voice
+        # Chatterbox guidance: when the reference voice speaks another language, cfg_weight=0 avoids
+        # carrying its accent over (e.g. an English voice speaking Saudi Arabic).
+        ref_lang = PRESET_LANG.get(voice_key, "en" if voice_key in PRESETS else None)
+        if ref_lang and ref_lang != language:
+            cfg_weight = 0.0
+        use_saudi = language == "ar" and dialect == "saudi" and self.t3_saudi is not None
+        if language == "ar":
+            text = spell_numbers_ar(text, saudi=dialect == "saudi")
         with self.lock:
+            self.model.t3 = self.t3_saudi if use_saudi else self.t3_base
             self._use_voice(voice_key or "default", ref, exaggeration)
-            wav = self.model.generate(text, language_id=language, exaggeration=exaggeration, cfg_weight=cfg_weight)
+            wav = self.model.generate(text, language_id=language, exaggeration=exaggeration,
+                                      cfg_weight=cfg_weight, temperature=temperature)
         audio = wav.squeeze(0).numpy().astype(np.float32)
         buf = io.BytesIO()
         sf.write(buf, audio, self.model.sr, format="WAV", subtype="PCM_16")
@@ -220,7 +365,8 @@ class TTS:
         @api.get("/check")
         def check(authorization: str = Header(default="")):
             check_auth(authorization)
-            return {"ok": True, "languages": sorted(SUPPORTED_LANGUAGES), "presets": self.presets}
+            return {"ok": True, "languages": sorted(SUPPORTED_LANGUAGES), "presets": self.presets,
+                    "engines": {"saudi": self.t3_saudi is not None}}
 
         @api.post("/voice")
         async def add_voice(request: Request, authorization: str = Header(default="")):
@@ -258,9 +404,12 @@ class TTS:
                 raise HTTPException(status_code=400, detail="unsupported language")
             exaggeration = min(max(float(body.get("exaggeration", 0.5)), 0.25), 2.0)
             cfg_weight = min(max(float(body.get("cfg_weight", 0.5)), 0.0), 1.0)
+            temperature = min(max(float(body.get("temperature", 0.8)), 0.4), 1.2)
+            dialect = "msa" if str(body.get("dialect", "saudi")).lower() == "msa" else "saudi"
             voice_key = str(body.get("voice_key") or "default")
             try:
-                wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight, voice_key)
+                wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight,
+                                                       voice_key, dialect, temperature)
             except KeyError:
                 raise HTTPException(status_code=404, detail="unknown voice")
             except Exception as e:
