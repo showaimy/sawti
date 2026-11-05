@@ -439,13 +439,13 @@ class TTS:
         return buf.getvalue(), len(audio) / sr
 
     @modal.method()
-    def selftest(self, text="هلا والله! اليوم بنتكلم عن أهمية النوم الكافي، وكيف يأثر على صحتك النفسية وتركيزك في الشغل."):
+    def selftest(self, text="هلا والله! تدري إن قلة النوم تأثر على مزاجك وتركيزك في الشغل؟ نصيحتنا لك: نام من 7 إلى 8 ساعات، وابعد الجوال قبل النوم بنص ساعة."):
         """Run from CI after a deploy: one sample per engine, plus what Whisper hears in it."""
         import os
         import tempfile
 
         jobs = [
-            ("chatterbox-saudi", lambda: self.synthesize(text, "ar", 0.5, 0.5, "hq-p-kareem", "saudi", 0.8)),
+            ("namaa-saudi", lambda: self.synthesize(text, "ar", 0.4, 0.5, "hq-p-kareem", "saudi", 0.7)),  # calm explainer
             ("habibi-saudi", lambda: self.synthesize_habibi(text, "saudi", 1.0, "hq-p-kareem")),
         ]
         import traceback
