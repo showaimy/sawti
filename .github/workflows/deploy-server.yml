@@ -69,3 +69,36 @@ jobs:
             sleep 10
           done
           echo "::warning::Deployed, but /health did not answer yet (first start can take a few minutes)."
+
+      - name: Voice samples (one per engine, plus what Whisper hears)
+        continue-on-error: true
+        run: |
+          mkdir -p samples
+          python - <<'PY'
+          import time
+          import modal
+
+          for attempt in range(6):
+              try:
+                  results = modal.Cls.from_name("sawti-tts", "TTS")().selftest.remote()
+                  break
+              except Exception as e:  # the previous version may still be answering right after a deploy
+                  print("not ready yet:", type(e).__name__, str(e)[:200])
+                  time.sleep(60)
+          else:
+              raise SystemExit("self-test did not run")
+          for r in results:
+              if r.get("wav"):
+                  open(f"samples/{r['name']}.wav", "wb").write(r["wav"])
+                  print(f"{r['name']}: {r['seconds']} s | heard: {r['heard']}")
+              else:
+                  print(f"{r['name']}: FAILED {r.get('error')}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: voice-samples
+          path: samples/
+          if-no-files-found: ignore
+          retention-days: 7

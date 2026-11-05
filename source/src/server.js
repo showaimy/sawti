@@ -14,11 +14,15 @@ export const LANGUAGES = [
 // Speaking styles, from Resemble AI's Chatterbox guidance: more expression with a lower pacing
 // weight sounds livelier; a lower temperature keeps explainers steady.
 export const STYLES = [
-  { id: 'natural', name: 'طبيعي', exaggeration: 0.5, cfgWeight: 0.5, temperature: 0.8 },
-  { id: 'ad', name: 'إعلان حماسي', exaggeration: 0.8, cfgWeight: 0.3, temperature: 0.85 },
-  { id: 'explain', name: 'شرح هادئ وواضح', exaggeration: 0.4, cfgWeight: 0.5, temperature: 0.7 },
-  { id: 'story', name: 'معبّر جداً (قصص ومشاعر)', exaggeration: 1.1, cfgWeight: 0.3, temperature: 0.9 },
+// speed is used by Habibi, which takes its expression from the voice clip itself.
+  { id: 'natural', name: 'طبيعي', exaggeration: 0.5, cfgWeight: 0.5, temperature: 0.8, speed: 1.0 },
+  { id: 'ad', name: 'إعلان حماسي', exaggeration: 0.8, cfgWeight: 0.3, temperature: 0.85, speed: 1.06 },
+  { id: 'explain', name: 'شرح هادئ وواضح', exaggeration: 0.4, cfgWeight: 0.5, temperature: 0.7, speed: 0.92 },
+  { id: 'story', name: 'معبّر جداً (قصص ومشاعر)', exaggeration: 1.1, cfgWeight: 0.3, temperature: 0.9, speed: 0.97 },
 ];
+
+// Habibi reads Arabic only and copies the voice clip, so it needs a voice recorded in Arabic.
+export const canUseHabibi = (voice) => voice?.id === 'hq-p-kareem' || !!voice?.samples;
 
 export const DEFAULT_VOICE = { id: 'hq-default', name: 'الصوت الافتراضي', desc: 'صوت النموذج الأساسي' };
 
@@ -131,10 +135,12 @@ async function voiceKeyFor(voice, onProgress) {
 /**
  * Generates speech on the server, one sentence group per request.
  * @param {{chunks:string[], language:string, voice:object, exaggeration:number,
- *   cfgWeight?:number, temperature?:number, dialect?:'saudi'|'msa'}} o
+ *   cfgWeight?:number, temperature?:number, dialect?:'saudi'|'msa', engine?:'chatterbox'|'habibi', speed?:number}} o
  * Arabic with dialect 'saudi' uses the server's Saudi-dialect model.
  */
-export async function synthesize({ chunks, language, voice, exaggeration, cfgWeight = 0.5, temperature = 0.8, dialect = 'saudi' }, onProgress) {
+export async function synthesize({ chunks, language, voice, exaggeration, cfgWeight = 0.5, temperature = 0.8, dialect = 'saudi', engine = 'chatterbox', speed = 1 }, onProgress) {
+  if (engine === 'habibi' && language !== 'ar') engine = 'chatterbox';
+  if (engine === 'habibi' && !canUseHabibi(voice)) throw new Error('SERVER_HABIBI_VOICE');
   if (!password) throw new Error('SERVER_NOT_CONNECTED');
   let key = await voiceKeyFor(voice, onProgress);
   const parts = [];
@@ -144,7 +150,7 @@ export async function synthesize({ chunks, language, voice, exaggeration, cfgWei
     const send = () => request('/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: chunks[i], language, exaggeration, cfg_weight: cfgWeight, temperature, dialect, voice_key: key }),
+      body: JSON.stringify({ text: chunks[i], language, exaggeration, cfg_weight: cfgWeight, temperature, dialect, engine, speed, voice_key: key }),
     });
     let res = await send();
     if (res.status === 404) {
@@ -155,6 +161,8 @@ export async function synthesize({ chunks, language, voice, exaggeration, cfgWei
       res = await send();
     }
     if (res.status === 413) throw new Error('SERVER_TOO_LONG');
+    if (res.status === 422) throw new Error('SERVER_HABIBI_VOICE');
+    if (res.status === 503) throw new Error('SERVER_HABIBI_MISSING');
     if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
     const wav = parseWav(await res.arrayBuffer());
     rate = wav.rate;

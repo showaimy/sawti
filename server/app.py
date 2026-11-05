@@ -6,14 +6,16 @@ shuts down when idle, so it only spends credits while generating.
 
 Auth: every endpoint except /health needs  Authorization: Bearer <encodeURIComponent(SAWTI_PASSWORD)>
 
-  GET  /health   -> {"ok": true, "engines": {"saudi": true}}
+  GET  /health   -> {"ok": true, "engines": {"saudi": true, "habibi": true}}
   GET  /check    -> {"ok": true, "languages": [...], "presets": [...]}
   POST /voice    -> {"voice_key": "u-..."}      body: {"ref_audio": "<base64 wav/mp3/m4a>"}
                     Stores a custom voice once (kept across restarts), so later requests send only the key.
   POST /tts      -> audio/wav                    body: {"text": "...", "language": "ar",
                     "voice_key": "default" | "<preset id>" | "u-...", "exaggeration": 0.5, "cfg_weight": 0.5,
-                    "temperature": 0.8, "dialect": "saudi" | "msa"}
+                    "temperature": 0.8, "dialect": "saudi" | "msa", "engine": "chatterbox" | "habibi", "speed": 1.0}
                     Arabic + dialect "saudi" uses the Saudi-dialect model (NAMAA-Saudi-TTS) when available.
+                    engine "habibi" = Habibi-TTS Unified (Arabic only, needs an Arabic voice: Kareem or your own).
+                    Its weights are CC BY-NC-SA 4.0: non-commercial use only.
                     One sentence group per request keeps each call well under the web timeout.
                     404 {"detail": "unknown voice"} means: upload the voice again with /voice.
 
@@ -33,6 +35,17 @@ ALLOWED_ORIGINS = [
 ]
 MAX_TEXT_CHARS = 600
 SAUDI_REPO = "NAMAA-Space/NAMAA-Saudi-TTS"
+# Habibi-TTS (SWivid, F5-TTS based). Unified weights: CC BY-NC-SA 4.0 -> non-commercial use only.
+HABIBI_REPO = "SWivid/Habibi-TTS"
+HABIBI_CKPT = "Unified/model_200000.safetensors"
+HABIBI_VOCAB = "Unified/vocab.txt"
+VOCOS_REPO = "charactr/vocos-mel-24khz"
+WHISPER_REPO = "openai/whisper-large-v3-turbo"  # writes down what a reference clip says (Habibi needs it)
+HABIBI_PRESETS = {"hq-p-kareem"}  # ready-made voices recorded in Arabic; Habibi reads Arabic only
+
+
+class VoiceNotArabic(Exception):
+    pass
 MAX_REF_BYTES = 8 * 1024 * 1024
 
 # Ready-made voices: each one is read once by an open Piper voice when the image is built,
@@ -169,6 +182,29 @@ def download_weights():
         print("Saudi weights FAILED:", repr(e))
 
 
+def download_habibi():
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    try:
+        for f in (HABIBI_CKPT, HABIBI_VOCAB):
+            hf_hub_download(HABIBI_REPO, f)
+        for f in ("config.yaml", "pytorch_model.bin"):
+            hf_hub_download(VOCOS_REPO, f)
+        snapshot_download(WHISPER_REPO, allow_patterns=["*.json", "*.safetensors", "*.txt"])
+    except Exception as e:  # keep building; the server then runs without Habibi
+        print("Habibi weights FAILED:", repr(e))
+
+
+def _habibi_files_present():
+    try:
+        from huggingface_hub import hf_hub_download
+
+        hf_hub_download(HABIBI_REPO, HABIBI_CKPT, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
 def make_preset_refs():
     """Builds one reference clip per ready-made voice. A failure here only drops that voice."""
     import os
@@ -194,10 +230,14 @@ def make_preset_refs():
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libsndfile1")
-    .pip_install("chatterbox-tts==0.1.7", "fastapi[standard]==0.115.12", "soundfile", "piper-tts==1.8.0")
+    .pip_install(
+        "chatterbox-tts==0.1.7", "fastapi[standard]==0.115.12", "soundfile", "piper-tts==1.8.0",
+        "habibi-tts==0.1.1", "datasets>=3.0",  # without the datasets floor, pip falls back to an ancient release
+    )
     .env({"HF_HOME": MODEL_DIR, "HF_HUB_DISABLE_TELEMETRY": "1"})
     .run_function(download_weights)   # weights baked into the image: faster cold starts
     .run_function(make_preset_refs)   # ready-made voice clips baked in too
+    .run_function(download_habibi)    # Habibi + its vocoder + Whisper, also baked in
 )
 
 app = modal.App(APP_NAME)
@@ -229,6 +269,13 @@ class TTS:
         self.cond_cache = {}
         self.lock = threading.Lock()  # the model keeps per-voice state: one generation at a time
         self.presets = sorted(k for k in PRESETS if os.path.exists(f"{REF_DIR}/{k}.wav"))
+        # Habibi loads on first use, so the usual start stays as fast as before
+        self.habibi_ready = _habibi_files_present()
+        self.habibi = None
+        self.habibi_load_lock = threading.Lock()
+        self.habibi_lock = threading.Lock()
+        self.habibi_refs = {}  # voice key -> (trimmed reference wav, what it says)
+        self.asr = None
 
     def _load_saudi_t3(self):
         """Loads NAMAA's Saudi-dialect T3 next to the base one. Returns None if unavailable."""
@@ -297,6 +344,119 @@ class TTS:
         self.cond_cache[voice_key] = self.model.conds
         self.model.conds = copy.copy(self.model.conds)
 
+    # ---------- Habibi ----------
+    def _load_habibi(self):
+        if self.habibi is None:
+            with self.habibi_load_lock:
+                if self.habibi is None:
+                    from importlib.resources import files
+                    from huggingface_hub import hf_hub_download
+                    from hydra.utils import get_class
+                    from omegaconf import OmegaConf
+                    from f5_tts.infer.utils_infer import load_model, load_vocoder
+
+                    cfg = OmegaConf.load(str(files("f5_tts").joinpath("configs/F5TTS_v1_Base.yaml")))
+                    mel = cfg.model.mel_spec.mel_spec_type
+                    model = load_model(
+                        get_class(f"f5_tts.model.{cfg.model.backbone}"), cfg.model.arch,
+                        hf_hub_download(HABIBI_REPO, HABIBI_CKPT), mel_spec_type=mel,
+                        vocab_file=hf_hub_download(HABIBI_REPO, HABIBI_VOCAB), device="cuda",
+                    )
+                    vocoder = load_vocoder(vocoder_name=mel, device="cuda")
+                    self.habibi = (model, vocoder, mel)
+                    print("Habibi ready")
+        return self.habibi
+
+    def _transcribe(self, path):
+        import torch
+        from transformers import pipeline
+
+        if self.asr is None:
+            try:
+                self.asr = pipeline("automatic-speech-recognition", model=WHISPER_REPO, dtype=torch.float16, device="cuda")
+            except TypeError:  # older transformers
+                self.asr = pipeline("automatic-speech-recognition", model=WHISPER_REPO, torch_dtype=torch.float16, device="cuda")
+        out = self.asr(path, chunk_length_s=30, return_timestamps=False,
+                       generate_kwargs={"task": "transcribe", "language": "arabic"})
+        return out["text"].strip()
+
+    def _habibi_ref(self, voice_key, ref_bytes):
+        """Trims the voice clip to at most 12 s (Habibi's limit) and writes down what it says."""
+        if voice_key in self.habibi_refs:
+            return self.habibi_refs[voice_key]
+        import os
+        import tempfile
+        from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+
+        fd, raw = tempfile.mkstemp(suffix=".wav")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(ref_bytes)
+            # a placeholder text skips F5's own transcription; ours below is forced to Arabic
+            trimmed, _ = preprocess_ref_audio_text(raw, "-", show_info=lambda *a, **k: None)
+        finally:
+            os.remove(raw)
+        ref_text = self._transcribe(trimmed)
+        if not ref_text.endswith((".", "。", "!", "؟", "?")):
+            ref_text += "."
+        ref_text += " "
+        print(f"Habibi reference {voice_key}: {ref_text!r}")
+        self.habibi_refs[voice_key] = (trimmed, ref_text)
+        return trimmed, ref_text
+
+    def synthesize_habibi(self, text, dialect, speed, voice_key):
+        import io
+        import numpy as np
+        import soundfile as sf
+
+        if voice_key not in HABIBI_PRESETS and not voice_key.startswith("u-"):
+            raise VoiceNotArabic(voice_key)
+        ref = self._ref_bytes(voice_key)  # KeyError -> unknown voice
+        saudi = dialect == "saudi"
+        text = spell_numbers_ar(text, saudi=saudi)
+        model, vocoder, mel = self._load_habibi()
+        from habibi_tts.infer.utils_infer import infer_process
+        from habibi_tts.model.utils import dialect_id_map
+
+        with self.habibi_lock:
+            ref_audio, ref_text = self._habibi_ref(voice_key, ref)
+            wave, sr, _ = infer_process(
+                ref_audio, ref_text, text, model, vocoder, mel_spec_type=mel,
+                show_info=lambda *a, **k: None, progress=None, nfe_step=32, cfg_strength=2.0,
+                speed=speed, device="cuda", dialect_id=dialect_id_map["SAU" if saudi else "MSA"],
+            )
+        audio = np.asarray(wave, dtype=np.float32)
+        buf = io.BytesIO()
+        sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
+        return buf.getvalue(), len(audio) / sr
+
+    @modal.method()
+    def selftest(self, text="هلا والله! اليوم بنتكلم عن أهمية النوم الكافي، وكيف يأثر على صحتك النفسية وتركيزك في الشغل."):
+        """Run from CI after a deploy: one sample per engine, plus what Whisper hears in it."""
+        import os
+        import tempfile
+
+        jobs = [
+            ("chatterbox-saudi", lambda: self.synthesize(text, "ar", 0.5, 0.5, "hq-p-kareem", "saudi", 0.8)),
+            ("habibi-saudi", lambda: self.synthesize_habibi(text, "saudi", 1.0, "hq-p-kareem")),
+        ]
+        out = []
+        for name, job in jobs:
+            try:
+                wav, secs = job()
+                fd, path = tempfile.mkstemp(suffix=".wav")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(wav)
+                heard = self._transcribe(path)
+                os.remove(path)
+                out.append({"name": name, "seconds": round(secs, 2), "heard": heard, "wav": wav})
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                out.append({"name": name, "error": f"{type(e).__name__}: {e}"})
+        return out
+
     def synthesize(self, text, language, exaggeration, cfg_weight, voice_key, dialect="saudi", temperature=0.8):
         import io
         import numpy as np
@@ -361,13 +521,13 @@ class TTS:
         @api.get("/health")
         def health():
             # no secrets here: only whether the Saudi-dialect model loaded, so a deploy can be checked
-            return {"ok": True, "engines": {"saudi": self.t3_saudi is not None}}
+            return {"ok": True, "engines": {"saudi": self.t3_saudi is not None, "habibi": self.habibi_ready}}
 
         @api.get("/check")
         def check(authorization: str = Header(default="")):
             check_auth(authorization)
             return {"ok": True, "languages": sorted(SUPPORTED_LANGUAGES), "presets": self.presets,
-                    "engines": {"saudi": self.t3_saudi is not None}}
+                    "engines": {"saudi": self.t3_saudi is not None, "habibi": self.habibi_ready}}
 
         @api.post("/voice")
         async def add_voice(request: Request, authorization: str = Header(default="")):
@@ -408,9 +568,21 @@ class TTS:
             temperature = min(max(float(body.get("temperature", 0.8)), 0.4), 1.2)
             dialect = "msa" if str(body.get("dialect", "saudi")).lower() == "msa" else "saudi"
             voice_key = str(body.get("voice_key") or "default")
+            engine = "habibi" if str(body.get("engine", "")).lower() == "habibi" else "chatterbox"
+            speed = min(max(float(body.get("speed", 1.0)), 0.7), 1.3)
+            if engine == "habibi":
+                if language != "ar":
+                    raise HTTPException(status_code=400, detail="habibi speaks Arabic only")
+                if not self.habibi_ready:
+                    raise HTTPException(status_code=503, detail="habibi not installed")
             try:
-                wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight,
-                                                       voice_key, dialect, temperature)
+                if engine == "habibi":
+                    wav, seconds = await run_in_threadpool(self.synthesize_habibi, text, dialect, speed, voice_key)
+                else:
+                    wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight,
+                                                           voice_key, dialect, temperature)
+            except VoiceNotArabic:
+                raise HTTPException(status_code=422, detail="habibi needs an Arabic voice")
             except KeyError:
                 raise HTTPException(status_code=404, detail="unknown voice")
             except Exception as e:

@@ -162,3 +162,5 @@ select:focus, input[type=text]:focus { border-color: var(--accent); outline: non
 .connected { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; margin-bottom: 12px; }
 .badge.off { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
 .primary:disabled { cursor: not-allowed; }
+
+.voice-wrap.dim .voice { opacity: .55; }

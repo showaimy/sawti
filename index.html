@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <script type="module" crossorigin src="./assets/index-CqdFhZmP.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-BOmQgZEW.css">
+  <script type="module" crossorigin src="./assets/index-BUxbokTj.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-CrKEmlTM.css">
 </head>
 <body>
   <header class="top">
@@ -67,15 +67,24 @@
             <option value="msa">فصحى</option>
           </select>
         </div>
+        <div class="control" id="engineControl">
+          <label for="engine" class="label">المحرك</label>
+          <select id="engine">
+            <option value="chatterbox">NAMAA · تتحكم بالتعبير</option>
+            <option value="habibi">Habibi · لهجة أقوى (غير تجاري)</option>
+          </select>
+        </div>
         <div class="control">
           <label for="style" class="label">أسلوب الكلام</label>
           <select id="style"></select>
         </div>
-        <div class="control">
+        <div class="control" id="exaggerationControl">
           <label for="exaggeration" class="label">قوة التعبير <output id="exaggerationOut">متوسط</output></label>
           <input type="range" id="exaggeration" min="0.25" max="1.5" step="0.05" value="0.5" />
         </div>
       </div>
+
+      <p class="hint" id="habibiHint" hidden>Habibi ياخذ الإحساس والنبرة من الصوت نفسه، فيشتغل مع «كريم» أو صوتك أنت. أفضل نتيجة: سجّل صوتك 8 إلى 12 ثانية بكلام سعودي طبيعي وواضح. رخصته للاستخدام غير التجاري فقط.</p>
 
       <button type="button" class="primary" id="generateBtn"><span class="btn-label">ولّد الصوت</span></button>
       <div class="progress" id="progress" hidden>
@@ -131,7 +140,7 @@
   </main>
 
   <footer class="foot">
-    <p>الصوت يتولّد على سيرفرك الخاص على Modal، وما ينزل شي على جهازك. السجل وأصواتك تنحفظ في متصفحك. المحرك: Chatterbox Multilingual من Resemble AI (رخصة MIT).</p>
+    <p>الصوت يتولّد على سيرفرك الخاص على Modal، وما ينزل شي على جهازك. السجل وأصواتك تنحفظ في متصفحك. المحركات: Chatterbox Multilingual من Resemble AI (رخصة MIT)، وNAMAA-Saudi-TTS للهجة السعودية (رخصة MIT)، وHabibi-TTS من SWivid (رخصة CC BY-NC-SA 4.0، للاستخدام غير التجاري فقط).</p>
   </footer>
 
 </body>

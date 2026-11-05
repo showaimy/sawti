@@ -1,5 +1,5 @@
 import { splitText, encodeWav, cleanupOldDownloads } from './utils.js';
-import { LANGUAGES, STYLES, DEFAULT_VOICE, PRESETS, isConnected, connect, disconnect, synthesize, forgetVoice } from './server.js';
+import { LANGUAGES, STYLES, canUseHabibi, DEFAULT_VOICE, PRESETS, isConnected, connect, disconnect, synthesize, forgetVoice } from './server.js';
 import { decodeToMono, tidyClip, Recorder } from './audio.js';
 import * as store from './store.js';
 
@@ -10,6 +10,7 @@ const els = {
   selectedVoice: $('selectedVoice'), script: $('script'), charCount: $('charCount'), sampleBtn: $('sampleBtn'), arHint: $('arHint'),
   language: $('language'), exaggeration: $('exaggeration'), exaggerationOut: $('exaggerationOut'),
   dialect: $('dialect'), dialectControl: $('dialectControl'), style: $('style'),
+  engine: $('engine'), engineControl: $('engineControl'), exaggerationControl: $('exaggerationControl'), habibiHint: $('habibiHint'),
   generate: $('generateBtn'), progress: $('progress'), bar: $('progressBar'), progressText: $('progressText'),
   error: $('errorBox'), result: $('result'), player: $('player'), download: $('downloadLink'), resultMeta: $('resultMeta'),
   voiceList: $('voiceList'), addVoiceBtn: $('addVoiceBtn'),
@@ -37,13 +38,16 @@ let selectedId = prefs.voiceId || PRESETS[0].id;
 let lang = prefs.hqLang || 'ar';
 let dialect = prefs.dialect === 'msa' ? 'msa' : 'saudi';
 let styleId = STYLES.some((x) => x.id === prefs.style) ? prefs.style : STYLES[0].id;
+let engine = prefs.engine === 'habibi' ? 'habibi' : 'chatterbox';
+const usingHabibi = () => lang === 'ar' && engine === 'habibi';
 let myVoices = [];
 let busy = false;
 let currentUrl = null;
-const savePrefs = () => store.savePrefs({ voiceId: selectedId, hqLang: lang, dialect, style: styleId });
+const savePrefs = () => store.savePrefs({ voiceId: selectedId, hqLang: lang, dialect, style: styleId, engine });
 const styleById = (id) => STYLES.find((x) => x.id === id) || STYLES[0];
 // text key for samples: Saudi Arabic has its own lines
 const textKey = () => (lang === 'ar' && dialect === 'saudi' ? 'saudi' : lang);
+const sampleTag = () => textKey() + (usingHabibi() ? '-habibi' : '');
 
 const voiceById = (id) => (id === DEFAULT_VOICE.id ? DEFAULT_VOICE : PRESETS.find((v) => v.id === id) || myVoices.find((v) => v.id === id));
 const langLabel = (code) => LANGUAGES.find(([c]) => c === code)?.[1] || code;
@@ -106,11 +110,14 @@ function applyStyle() {
   els.exaggeration.dispatchEvent(new Event('input'));
 }
 els.style.addEventListener('change', () => { styleId = els.style.value; savePrefs(); applyStyle(); });
+els.engine.value = engine;
+els.engine.addEventListener('change', () => { engine = els.engine.value === 'habibi' ? 'habibi' : 'chatterbox'; savePrefs(); renderAll(); });
 
 // ---------- voice list ----------
 function voiceRow({ id, name, desc, onDelete }) {
   const li = document.createElement('li');
   li.className = 'voice-wrap';
+  if (usingHabibi() && !canUseHabibi(voiceById(id))) { li.classList.add('dim'); desc += ' · ما يشتغل مع Habibi'; }
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'voice';
@@ -167,6 +174,9 @@ function renderCompose() {
   els.selectedVoice.querySelector('.muted').textContent = `· يتكلم ${lang === 'ar' ? (dialect === 'saudi' ? 'باللهجة السعودية' : 'بالفصحى') : langLabel(lang)}`;
   els.arHint.hidden = lang !== 'ar';
   els.dialectControl.hidden = lang !== 'ar';
+  els.engineControl.hidden = lang !== 'ar';
+  els.exaggerationControl.hidden = usingHabibi();
+  els.habibiHint.hidden = !usingHabibi();
 }
 
 function renderAll() { renderVoices(); renderCompose(); renderConnection(); }
@@ -210,6 +220,8 @@ function friendlyError(e) {
   if (/SERVER_BAD_PASSWORD/.test(m)) return 'كلمة المرور غلط. اكتبها مثل ما حطيتها في SAWTI_PASSWORD بالضبط.';
   if (/SERVER_NOT_CONNECTED/.test(m)) return 'اتصل بالسيرفر أول: اكتب كلمة المرور فوق واضغط «اتصال».';
   if (/SERVER_UNREACHABLE/.test(m)) return 'ما قدرت أوصل للسيرفر. تأكد من الإنترنت وجرّب مرة ثانية. إذا تكرر، ممكن رصيد Modal خلص لهذا الشهر.';
+  if (/SERVER_HABIBI_VOICE/.test(m)) return 'Habibi يحتاج صوت يتكلم عربي: اختر «كريم» أو أضف صوتك أنت من «إضافة صوت».';
+  if (/SERVER_HABIBI_MISSING/.test(m)) return 'محرك Habibi مو جاهز على السيرفر حالياً. استخدم NAMAA لين ينحل.';
   if (/SERVER_TOO_LONG/.test(m)) return 'جزء من النص طويل جداً. حط نقاط أو فواصل بين الجمل.';
   if (/SERVER_VOICE_MISSING/.test(m)) return 'هذا الصوت مو موجود على السيرفر حالياً. جرّب صوت ثاني.';
   if (/SERVER_ERROR/.test(m)) return `صار خطأ في السيرفر (${m.replace('SERVER_ERROR ', '')}). جرّب مرة ثانية بعد شوي.`;
@@ -243,10 +255,11 @@ els.generate.addEventListener('click', async () => {
     const out = await synthesize({
       chunks: splitText(text, 220), language: lang, voice, exaggeration,
       cfgWeight: st.cfgWeight, temperature: st.temperature, dialect,
+      engine: usingHabibi() ? 'habibi' : 'chatterbox', speed: st.speed,
     }, showProgress);
     showResult(out.blob, `${voice.name} · ${formatSeconds(out.seconds)}`);
     els.player.play().catch(() => {});
-    await store.addHistory({ text, voiceId: voice.id, voiceName: voice.name, engine: 'hq', language: lang, dialect, style: styleId, exaggeration, seconds: out.seconds, blob: out.blob, createdAt: Date.now() });
+    await store.addHistory({ text, voiceId: voice.id, voiceName: voice.name, engine: usingHabibi() ? 'habibi' : 'hq', language: lang, dialect, style: styleId, exaggeration, seconds: out.seconds, blob: out.blob, createdAt: Date.now() });
     renderHistory();
   } catch (e) {
     console.error(e);
@@ -286,7 +299,7 @@ async function previewVoice(id, btn) {
   unlockPreview(); // inside the tap, before any await (iPhone)
   const voice = voiceById(id);
   const cache = await sampleCache();
-  const key = sampleKey(id, textKey());
+  const key = sampleKey(id, sampleTag());
   const hit = cache && await cache.match(key);
   if (hit) { playSample(await hit.blob(), voice.name); return; }
   if (!isConnected()) { showError(friendlyError('SERVER_NOT_CONNECTED')); els.pass.focus(); return; }
@@ -295,7 +308,7 @@ async function previewVoice(id, btn) {
   showError('');
   setBusy(true, 'أجهّز عيّنة الصوت...');
   try {
-    const out = await synthesize({ chunks: [SAMPLE_LINES[textKey()] || SAMPLE_LINES.other], language: lang, voice, exaggeration: 0.5, dialect }, showProgress);
+    const out = await synthesize({ chunks: [SAMPLE_LINES[textKey()] || SAMPLE_LINES.other], language: lang, voice, exaggeration: 0.5, dialect, engine: usingHabibi() ? 'habibi' : 'chatterbox' }, showProgress);
     if (cache) { try { await cache.put(key, new Response(out.blob, { headers: { 'content-type': 'audio/wav' } })); } catch { /* storage full */ } }
     playSample(out.blob, voice.name);
   } catch (e) {
@@ -420,13 +433,14 @@ async function renderHistory() {
     li.querySelector('audio').src = url;
     const a = li.querySelector('.dl');
     a.href = url; a.download = `sawti-${it.id}.wav`;
-    const extra = it.language ? ` · ${it.language === 'ar' && it.dialect ? (it.dialect === 'saudi' ? 'سعودي' : 'فصحى') : langLabel(it.language)}` : '';
+    const extra = (it.language ? ` · ${it.language === 'ar' && it.dialect ? (it.dialect === 'saudi' ? 'سعودي' : 'فصحى') : langLabel(it.language)}` : '') + (it.engine === 'habibi' ? ' · Habibi' : '');
     li.querySelector('.when').textContent = `${name}${extra} · ${formatSeconds(it.seconds)} · ${new Date(it.createdAt).toLocaleString('ar', { dateStyle: 'medium', timeStyle: 'short' })}`;
     li.querySelector('.reuse').addEventListener('click', () => {
       els.script.value = it.text; updateCount();
       if (voiceById(it.voiceId)) selectedId = it.voiceId;
       if (it.language) { lang = it.language; els.language.value = lang; }
       if (it.dialect) { dialect = it.dialect; els.dialect.value = dialect; }
+      if (it.engine === 'habibi' || it.engine === 'hq') { engine = it.engine === 'habibi' ? 'habibi' : 'chatterbox'; els.engine.value = engine; }
       if (it.style && STYLES.some((x) => x.id === it.style)) { styleId = it.style; els.style.value = styleId; }
       if (it.exaggeration) { els.exaggeration.value = it.exaggeration; els.exaggeration.dispatchEvent(new Event('input')); }
       savePrefs(); renderAll();
