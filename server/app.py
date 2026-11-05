@@ -108,13 +108,14 @@ voices_store = modal.Dict.from_name("sawti-voices", create_if_missing=True)  # c
 class TTS:
     @modal.enter()
     def load(self):
-        import copy
         import os
         import threading
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
         self.model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
-        self.default_conds = copy.deepcopy(self.model.conds)
+        # Keep references only: Chatterbox's voice tensors cannot be deep-copied. generate() replaces
+        # conds.t3 when the expression level changes, so each request works on a shallow copy.
+        self.default_conds = self.model.conds
         self.cond_cache = {}
         self.lock = threading.Lock()  # the model keeps per-voice state: one generation at a time
         self.presets = sorted(k for k in PRESETS if os.path.exists(f"{REF_DIR}/{k}.wav"))
@@ -144,10 +145,10 @@ class TTS:
         import tempfile
 
         if ref_bytes is None:
-            self.model.conds = copy.deepcopy(self.default_conds)
+            self.model.conds = copy.copy(self.default_conds)
             return
         if voice_key in self.cond_cache:
-            self.model.conds = copy.deepcopy(self.cond_cache[voice_key])
+            self.model.conds = copy.copy(self.cond_cache[voice_key])
             return
         fd, path = tempfile.mkstemp(suffix=".audio")
         try:
@@ -158,7 +159,8 @@ class TTS:
             os.remove(path)
         if len(self.cond_cache) >= 24:
             self.cond_cache.pop(next(iter(self.cond_cache)))
-        self.cond_cache[voice_key] = copy.deepcopy(self.model.conds)
+        self.cond_cache[voice_key] = self.model.conds
+        self.model.conds = copy.copy(self.model.conds)
 
     def synthesize(self, text, language, exaggeration, cfg_weight, voice_key):
         import io
@@ -233,8 +235,13 @@ class TTS:
             if len(data) > MAX_REF_BYTES:
                 raise HTTPException(status_code=413, detail="ref_audio too large")
             key = "u-" + hashlib.sha256(data).hexdigest()[:32]
-            if await voices_store.get.aio(key) is None:
-                await voices_store.put.aio(key, data)
+            try:
+                if await voices_store.get.aio(key) is None:
+                    await voices_store.put.aio(key, data)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"could not store voice: {type(e).__name__}")
             return {"voice_key": key}
 
         @api.post("/tts")
@@ -256,6 +263,10 @@ class TTS:
                 wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight, voice_key)
             except KeyError:
                 raise HTTPException(status_code=404, detail="unknown voice")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"generation failed: {type(e).__name__}")
             return Response(content=wav, media_type="audio/wav", headers={"X-Audio-Seconds": f"{seconds:.2f}"})
 
         return api

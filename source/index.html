@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>صوتي — تحويل النص إلى صوت داخل متصفحك</title>
-  <meta name="description" content="حوّل النص إلى صوت مباشرة في متصفحك، بأصوات عالية الجودة أو بصوتك أنت، بدون سيرفر وبدون اشتراك." />
+  <title>صوتي — تحويل النص إلى صوت</title>
+  <meta name="description" content="حوّل النص إلى صوت بأصوات عالية الجودة أو بصوتك أنت، بـ 23 لغة منها العربي." />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23C2410C'/%3E%3Cpath d='M9 13v6M13 10v12M17 8v16M21 11v10M25 14v4' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -19,19 +19,35 @@
       </span>
       <div>
         <h1>صوتي</h1>
-        <p class="tag">النص يتحوّل إلى صوت داخل جهازك، بدون سيرفر</p>
+        <p class="tag">حوّل النص إلى صوت بـ 23 لغة منها العربي</p>
       </div>
     </div>
-    <span class="badge" id="runBadge">يعمل على جهازك</span>
+    <span class="badge" id="runBadge">غير متصل</span>
   </header>
 
   <main class="layout">
     <section class="panel compose" aria-labelledby="composeTitle">
       <h2 id="composeTitle" class="sr-only">اكتب النص</h2>
-      <button type="button" class="srv-hint" id="srvHint" hidden>للأصوات عالية الجودة على الجوال: شغّل «السيرفر» من قسم الأصوات ↓</button>
+
+      <form class="connect" id="connectForm" novalidate>
+        <div class="connect-head">
+          <strong>الاتصال بالسيرفر</strong>
+          <span class="muted small" id="connectHint">اكتب كلمة المرور اللي حطيتها في SAWTI_PASSWORD. تنحفظ في هذا الجهاز.</span>
+        </div>
+        <div class="row gap nowrap">
+          <input type="password" id="serverPass" autocomplete="current-password" placeholder="كلمة المرور" aria-label="كلمة مرور السيرفر" />
+          <button type="submit" class="primary small-btn" id="connectBtn">اتصال</button>
+        </div>
+        <p class="small" id="connectStatus" aria-live="polite"></p>
+      </form>
+      <div class="connected" id="connectedBar" hidden>
+        <span class="ok">✓ متصل بالسيرفر</span>
+        <button type="button" class="link" id="changePass">تغيير كلمة المرور</button>
+      </div>
+
       <div class="selected-voice" id="selectedVoice"></div>
       <label for="script" class="label">النص</label>
-      <textarea id="script" dir="auto" rows="9" placeholder="اكتب النص اللي تبيه يتحوّل لصوت..."></textarea>
+      <textarea id="script" dir="auto" rows="8" placeholder="اكتب النص اللي تبيه يتحوّل لصوت..."></textarea>
       <div class="row meta">
         <span id="charCount">0 حرف</span>
         <button type="button" class="link" id="sampleBtn">جرّب نصاً تجريبياً</button>
@@ -39,21 +55,13 @@
       <p class="hint" id="arHint">للنطق الأدق في العربي: أضف التشكيل للكلمات اللي ممكن تنقرأ بأكثر من طريقة.</p>
 
       <div class="controls">
-        <div class="control" data-engine="hq">
+        <div class="control">
           <label for="language" class="label">لغة الكلام</label>
           <select id="language"></select>
         </div>
-        <div class="control" data-engine="hq">
+        <div class="control">
           <label for="exaggeration" class="label">قوة التعبير <output id="exaggerationOut">متوسط</output></label>
           <input type="range" id="exaggeration" min="0.25" max="1.5" step="0.05" value="0.5" />
-        </div>
-        <div class="control" data-engine="fast">
-          <label for="speed" class="label">السرعة <output id="speedOut">1.0×</output></label>
-          <input type="range" id="speed" min="0.6" max="1.6" step="0.1" value="1" />
-        </div>
-        <div class="control" data-engine="fast">
-          <label for="pause" class="label">الوقفة بين الجمل <output id="pauseOut">250 ملي ثانية</output></label>
-          <input type="range" id="pause" min="0" max="1000" step="50" value="250" />
         </div>
       </div>
 
@@ -75,63 +83,29 @@
 
     <aside class="panel voices" aria-labelledby="voicesTitle">
       <h2 id="voicesTitle">الأصوات</h2>
-      <div class="tabs" role="tablist" aria-label="نوع الصوت">
-        <button type="button" role="tab" class="tab" id="tabHq" data-tab="hq" aria-selected="true">عالية الجودة</button>
-        <button type="button" role="tab" class="tab" id="tabFast" data-tab="fast" aria-selected="false">سريعة</button>
-      </div>
+      <p class="note">كل الأصوات تتكلم أي لغة من الـ 23 لغة. اضغط «▶ اسمع» تسمع عيّنة قبل ما تختار.</p>
+      <ul class="voice-list" id="voiceList" role="radiogroup" aria-label="الأصوات"></ul>
+      <button type="button" class="secondary full" id="addVoiceBtn">+ أضف صوتك</button>
 
-      <div id="paneHq" role="tabpanel" aria-labelledby="tabHq">
-        <p class="note" id="hqNote">تتكلم 23 لغة منها العربي، وتقدر تضيف صوتك.</p>
-        <div class="server-box">
-          <span class="label">مكان التشغيل</span>
-          <div class="seg" role="radiogroup" aria-label="مكان التشغيل">
-            <button type="button" role="radio" class="seg-btn" data-run="device" aria-checked="true">جهازي</button>
-            <button type="button" role="radio" class="seg-btn" data-run="server" aria-checked="false">السيرفر</button>
-          </div>
-          <p class="muted small" id="runHint">جهازي: يحتاج كمبيوتر فيه كرت شاشة، وأول مرة ينزّل 1.5 جيجا.</p>
-          <form class="server-form" id="serverForm" hidden novalidate>
-            <label class="label" for="serverPass">كلمة مرور السيرفر</label>
-            <div class="row gap nowrap">
-              <input type="password" id="serverPass" autocomplete="current-password" placeholder="SAWTI_PASSWORD" />
-              <button type="submit" class="secondary" id="serverConnect">اتصال</button>
-            </div>
-            <p class="small" id="serverStatus" aria-live="polite"></p>
-          </form>
+      <form class="add-voice" id="addVoiceForm" hidden novalidate>
+        <h3>صوت جديد</h3>
+        <label class="label" for="voiceName">اسم الصوت</label>
+        <input type="text" id="voiceName" maxlength="30" placeholder="مثلاً: صوتي" />
+        <p class="muted small">ارفع مقطع أو سجّل من 10 إلى 30 ثانية: كلام واضح، صوت واحد، بدون موسيقى أو ضجة.</p>
+        <div class="row gap">
+          <label class="secondary file-btn">رفع ملف صوت<input type="file" id="voiceFile" accept="audio/*" hidden /></label>
+          <button type="button" class="secondary" id="recordBtn">تسجيل من المايك</button>
         </div>
-        <p class="warn" id="hqWarn" hidden></p>
-        <ul class="voice-list" id="hqList" role="radiogroup" aria-label="الأصوات عالية الجودة"></ul>
-        <button type="button" class="secondary full" id="addVoiceBtn">+ أضف صوتك</button>
-
-        <form class="add-voice" id="addVoiceForm" hidden novalidate>
-          <h3>صوت جديد</h3>
-          <label class="label" for="voiceName">اسم الصوت</label>
-          <input type="text" id="voiceName" maxlength="30" placeholder="مثلاً: صوتي" />
-          <p class="muted small">ارفع مقطع أو سجّل من 10 إلى 30 ثانية: كلام واضح، صوت واحد، بدون موسيقى أو ضجة.</p>
-          <div class="row gap">
-            <label class="secondary file-btn">رفع ملف صوت<input type="file" id="voiceFile" accept="audio/*" hidden /></label>
-            <button type="button" class="secondary" id="recordBtn">تسجيل من المايك</button>
-          </div>
-          <p class="record-hint" id="recordHint" hidden>اقرأ بصوت طبيعي: «أهلاً وسهلاً، هذا تسجيل لصوتي عشان أستخدمه في تحويل النصوص إلى كلام. أتكلم بهدوء ووضوح، وبنفس الطريقة اللي أتكلم فيها كل يوم.»</p>
-          <audio id="voicePreview" controls hidden></audio>
-          <p class="muted small" id="clipInfo"></p>
-          <label class="check"><input type="checkbox" id="consent" /> هذا صوتي، أو عندي إذن صاحب الصوت يستخدمه.</label>
-          <p class="error" id="voiceError" hidden></p>
-          <div class="row gap">
-            <button type="submit" class="primary small-btn" id="saveVoiceBtn">احفظ الصوت</button>
-            <button type="button" class="link" id="cancelVoiceBtn">إلغاء</button>
-          </div>
-        </form>
-      </div>
-
-      <div id="paneFast" role="tabpanel" aria-labelledby="tabFast" hidden>
-        <p class="note">أخف وأسرع، وتشتغل حتى على الجوال. كل صوت يتكلم لغته بس.</p>
-        <div class="filters" aria-label="اللغة">
-          <button type="button" class="chip" data-lang="ar" aria-pressed="true">عربي</button>
-          <button type="button" class="chip" data-lang="en" aria-pressed="false">إنجليزي</button>
+        <p class="record-hint" id="recordHint" hidden>اقرأ بصوت طبيعي: «أهلاً وسهلاً، هذا تسجيل لصوتي عشان أستخدمه في تحويل النصوص إلى كلام. أتكلم بهدوء ووضوح، وبنفس الطريقة اللي أتكلم فيها كل يوم.»</p>
+        <audio id="voicePreview" controls hidden></audio>
+        <p class="muted small" id="clipInfo"></p>
+        <label class="check"><input type="checkbox" id="consent" /> هذا صوتي، أو عندي إذن صاحب الصوت يستخدمه.</label>
+        <p class="error" id="voiceError" hidden></p>
+        <div class="row gap">
+          <button type="submit" class="primary small-btn" id="saveVoiceBtn">احفظ الصوت</button>
+          <button type="button" class="link" id="cancelVoiceBtn">إلغاء</button>
         </div>
-        <ul class="voice-list" id="fastList" role="radiogroup" aria-label="الأصوات السريعة"></ul>
-        <p class="muted small">كل صوت يتنزّل مرة وحدة (حوالي 60 ميجا).</p>
-      </div>
+      </form>
     </aside>
 
     <section class="panel history" aria-labelledby="historyTitle">
@@ -145,7 +119,7 @@
   </main>
 
   <footer class="foot">
-    <p>كل شيء يصير داخل متصفحك، والنص والأصوات ما تطلع من جهازك. الأصوات عالية الجودة من Chatterbox Multilingual (Resemble AI)، والسريعة من مشروع Piper. الاثنين برخصة MIT.</p>
+    <p>الصوت يتولّد على سيرفرك الخاص على Modal، وما ينزل شي على جهازك. السجل وأصواتك تنحفظ في متصفحك. المحرك: Chatterbox Multilingual من Resemble AI (رخصة MIT).</p>
   </footer>
 
   <script type="module" src="/src/main.js"></script>

@@ -9,12 +9,6 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@diffusionstudio/piper-wasm": "^1.0.0",
-    "@huggingface/transformers": "^4.3.2",
-    "@mintplex-labs/piper-tts-web": "^1.0.5",
-    "onnxruntime-web": "^1.18.0"
-  },
   "devDependencies": {
     "vite": "^5.4.21"
   }
