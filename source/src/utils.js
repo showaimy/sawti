@@ -48,6 +48,6 @@ export function encodeWav(samples, sampleRate) {
 // Older versions of the site stored model files in the browser (up to ~1.5 GB). Free that space.
 export async function cleanupOldDownloads() {
   try {
-    for (const name of ['transformers-cache', 'sawt-voices-v1']) await caches.delete(name);
+    for (const name of ['transformers-cache', 'sawt-voices-v1', 'sawt-samples-v1']) await caches.delete(name);
   } catch { /* caches not available */ }
 }
