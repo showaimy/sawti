@@ -146,11 +146,28 @@ function voiceButton({ id, name, desc, state, stateReady, onDelete, onPreview })
   return li;
 }
 
-let previewAudio = null;
-function playBlob(blob) {
-  previewAudio?.pause();
-  previewAudio = new Audio(URL.createObjectURL(blob));
-  previewAudio.play().catch(() => {});
+// One shared element. iPhone Safari only lets audio play from a tap, so it is "unlocked" during
+// the tap and reused when the sample arrives later. If playing still fails, the sample is shown
+// in the result player instead, where a tap plays it.
+const SILENCE = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+const previewAudio = new Audio();
+previewAudio.preload = 'auto';
+let previewUrl = null;
+function unlockPreview() {
+  try { previewAudio.src = SILENCE; const p = previewAudio.play(); p?.catch?.(() => {}); } catch { /* ignore */ }
+}
+function playBlob(blob, label) {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(blob);
+  previewAudio.pause();
+  previewAudio.src = previewUrl;
+  const p = previewAudio.play();
+  if (p?.catch) p.catch(() => showSampleInPlayer(blob, label));
+}
+function showSampleInPlayer(blob, label) {
+  showResult(blob, `عيّنة: ${label || ''}`, 0);
+  els.resultMeta.textContent = `عيّنة: ${label || ''} · اضغط ▶`;
+  els.result.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ---------- voice samples ("اسمع") ----------
@@ -164,13 +181,14 @@ const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(
 
 async function previewVoice(id, btn) {
   if (busy) return;
+  unlockPreview(); // must run inside the tap, before any await (iPhone)
   const hq = isHqId(id);
   const voice = anyVoice(id);
   const lang = hq ? hqLang : voice.lang;
   const cache = await sampleCache();
   const key = sampleKey(id, lang);
   const hit = cache && await cache.match(key);
-  if (hit) { playBlob(await hit.blob()); return; }
+  if (hit) { playBlob(await hit.blob(), voice.name); return; }
   if (hq && !support.ok) { showError(support.reason); return; }
   const label = btn.textContent;
   btn.textContent = '...';
@@ -182,8 +200,8 @@ async function previewVoice(id, btn) {
       ? await hqSynthesize({ chunks: [text], language: lang, voice, exaggeration: 0.5 }, showProgress)
       : await fastSynthesize({ text, voiceId: id, speed: 1, pauseMs: 250 }, showProgress);
     if (!hq) { downloaded.add(id); }
-    if (cache) await cache.put(key, new Response(out.blob, { headers: { 'content-type': 'audio/wav' } }));
-    playBlob(out.blob);
+    if (cache) { try { await cache.put(key, new Response(out.blob, { headers: { 'content-type': 'audio/wav' } })); } catch { /* storage full */ } }
+    playBlob(out.blob, voice.name);
   } catch (e) {
     console.error(e);
     showError(friendlyError(e));
@@ -254,7 +272,18 @@ function renderCompose() {
   els.generate.disabled = busy || (hq && !support.ok);
 }
 
-function renderAll() { renderHqList(); renderFastList(); renderCompose(); }
+function renderTop() {
+  const onServer = serverActive();
+  const badge = document.getElementById('runBadge');
+  badge.textContent = onServer && isHqId(selectedId) ? 'يعمل على السيرفر' : 'يعمل على جهازك';
+  const hint = document.getElementById('srvHint');
+  hint.hidden = onServer || support.ok || !/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+}
+document.getElementById('srvHint').addEventListener('click', () => {
+  setTab('hq');
+  els.paneHq.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+function renderAll() { renderHqList(); renderFastList(); renderCompose(); renderTop(); }
 
 // ---------- compose ----------
 function updateCount() {
@@ -287,8 +316,14 @@ function showProgress(p) {
     els.bar.style.width = `${pct}%`;
     els.progressText.textContent = `تنزيل المحرك لأول مرة... ${pct}% (${mb(p.loaded)} من ${mb(p.total)} ميجا). المرات الجاية ما يحتاج تنزيل.`;
   } else if (p.stage === 'server') {
-    els.bar.style.width = '60%';
-    els.progressText.textContent = 'السيرفر يولّد الصوت... (إذا كان طافي، يشتغل خلال دقيقة تقريباً)';
+    const n = p.count || 1, i = p.index || 1;
+    els.bar.style.width = `${Math.max(5, Math.round(((i - 1) / n) * 100))}%`;
+    const part = n > 1 ? ` جزء ${i} من ${n}` : '';
+    els.progressText.textContent = i === 1
+      ? `السيرفر يولّد الصوت...${part} (إذا كان طافي، يشتغل خلال دقيقة تقريباً)`
+      : `السيرفر يولّد الصوت...${part}`;
+  } else if (p.stage === 'server-voice') {
+    els.progressText.textContent = 'أرفع الصوت للسيرفر (مرة وحدة بس)...';
   } else if (p.stage === 'retry') {
     els.progressText.textContent = `انقطع الاتصال، أعيد المحاولة (${p.attempt})... التنزيل يكمل من نفس النقطة.`;
   } else if (p.stage === 'voice-download') {

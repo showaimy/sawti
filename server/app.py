@@ -4,13 +4,16 @@
 Runs Chatterbox Multilingual (Resemble AI, MIT) on a GPU that starts on demand and
 shuts down when idle, so it only spends credits while generating.
 
-Endpoints (all except /health need the header  Authorization: Bearer <SAWTI_PASSWORD>):
-  GET  /health        -> {"ok": true}
-  GET  /check         -> {"ok": true} if the password is right
-  POST /tts           -> audio/wav
-       JSON: {"chunks": ["..."], "language": "ar", "exaggeration": 0.5, "cfg_weight": 0.5,
-              "ref_audio": "<base64 wav, optional>"}
-       Without ref_audio the model's built-in voice is used.
+Auth: every endpoint except /health needs  Authorization: Bearer <encodeURIComponent(SAWTI_PASSWORD)>
+
+  GET  /health   -> {"ok": true}
+  GET  /check    -> {"ok": true, "languages": [...], "presets": [...]}
+  POST /voice    -> {"voice_key": "u-..."}      body: {"ref_audio": "<base64 wav/mp3/m4a>"}
+                    Stores a custom voice once (kept across restarts), so later requests send only the key.
+  POST /tts      -> audio/wav                    body: {"text": "...", "language": "ar",
+                    "voice_key": "default" | "<preset id>" | "u-...", "exaggeration": 0.5, "cfg_weight": 0.5}
+                    One sentence group per request keeps each call well under the web timeout.
+                    404 {"detail": "unknown voice"} means: upload the voice again with /voice.
 
 Deploy:  modal deploy server/app.py   (GitHub Actions does this on every push to server/)
 URL:     https://<workspace>--sawti.<region>.modal.run  (shown by modal deploy)
@@ -20,14 +23,28 @@ import modal
 
 APP_NAME = "sawti-tts"
 MODEL_DIR = "/models"
+REF_DIR = "/refs"
 ALLOWED_ORIGINS = [
     "https://showaimy.github.io",
     "http://localhost:4173",
     "http://localhost:5173",
 ]
-MAX_CHARS = 6000          # per request
-MAX_CHUNK_CHARS = 400     # per sentence group
+MAX_TEXT_CHARS = 600
 MAX_REF_BYTES = 8 * 1024 * 1024
+
+# Ready-made voices: each one is read once by an open Piper voice when the image is built,
+# and Chatterbox then speaks any of its 23 languages in that voice. Ids match the website.
+REF_AR = "السلامُ عليكم ورحمةُ الله. أهلاً وسهلاً بكم. اليومَ نتحدّثُ عن أهميةِ التخطيطِ الجيّد، وكيف يساعدُنا على إنجازِ أعمالِنا بهدوءٍ ووضوح. خذوا وقتَكم، واستمتعوا بالرحلة."
+REF_EN = "Hello, and welcome. Today we are talking about the value of good planning, and how it helps us finish our work calmly and clearly. Take your time, breathe, and enjoy the journey ahead of you."
+PRESETS = {
+    "hq-p-kareem": ("ar/ar_JO/kareem/medium/ar_JO-kareem-medium.onnx", REF_AR),
+    "hq-p-hannah": ("en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx", REF_EN),
+    "hq-p-henry": ("en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx", REF_EN),
+    "hq-p-lessac": ("en/en_US/lessac/medium/en_US-lessac-medium.onnx", REF_EN),
+    "hq-p-ryan": ("en/en_US/ryan/medium/en_US-ryan-medium.onnx", REF_EN),
+    "hq-p-alba": ("en/en_GB/alba/medium/en_GB-alba-medium.onnx", REF_EN),
+    "hq-p-alan": ("en/en_GB/alan/medium/en_GB-alan-medium.onnx", REF_EN),
+}
 
 
 def download_weights():
@@ -44,20 +61,44 @@ def download_weights():
     )
 
 
+def make_preset_refs():
+    """Builds one reference clip per ready-made voice. A failure here only drops that voice."""
+    import os
+    import wave
+    from huggingface_hub import hf_hub_download
+    from piper import PiperVoice, SynthesisConfig
+
+    os.makedirs(REF_DIR, exist_ok=True)
+    for key, (path, text) in PRESETS.items():
+        try:
+            model = hf_hub_download("rhasspy/piper-voices", path)
+            hf_hub_download("rhasspy/piper-voices", path + ".json")
+            voice = PiperVoice.load(model)
+            if path.startswith("ar/"):
+                voice.use_tashkeel = True  # adds missing diacritics, clearer Arabic
+            with wave.open(f"{REF_DIR}/{key}.wav", "wb") as w:
+                voice.synthesize_wav(text, w, syn_config=SynthesisConfig(length_scale=1.0))
+            print("preset ready:", key)
+        except Exception as e:  # keep building; the site falls back for missing presets
+            print("preset FAILED:", key, repr(e))
+
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libsndfile1")
-    .pip_install("chatterbox-tts==0.1.7", "fastapi[standard]==0.115.12", "soundfile")
+    .pip_install("chatterbox-tts==0.1.7", "fastapi[standard]==0.115.12", "soundfile", "piper-tts==1.8.0")
     .env({"HF_HOME": MODEL_DIR, "HF_HUB_DISABLE_TELEMETRY": "1"})
-    .run_function(download_weights)  # weights are baked into the image: faster cold starts
+    .run_function(download_weights)   # weights baked into the image: faster cold starts
+    .run_function(make_preset_refs)   # ready-made voice clips baked in too
 )
 
 app = modal.App(APP_NAME)
+voices_store = modal.Dict.from_name("sawti-voices", create_if_missing=True)  # custom voices survive restarts
 
 
 @app.cls(
     image=image,
-    gpu="T4",                      # ~0.59 $/hour while running; change to "L4" for more speed
+    gpu="T4",                      # ~0.59 $/hour while running; "L4" is faster (~0.80 $/hour)
     secrets=[modal.Secret.from_name("sawti-auth")],
     scaledown_window=180,          # stay warm 3 minutes after the last request, then stop
     timeout=600,
@@ -68,70 +109,78 @@ class TTS:
     @modal.enter()
     def load(self):
         import copy
-        import torch
+        import os
+        import threading
         from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-        self.torch = torch
         self.model = ChatterboxMultilingualTTS.from_pretrained(device="cuda")
         self.default_conds = copy.deepcopy(self.model.conds)
-        self.cond_cache = {}  # sha256 of reference audio -> Conditionals
-        import threading
-        self.lock = threading.Lock()  # the model keeps per-voice state, so one generation at a time
+        self.cond_cache = {}
+        self.lock = threading.Lock()  # the model keeps per-voice state: one generation at a time
+        self.presets = sorted(k for k in PRESETS if os.path.exists(f"{REF_DIR}/{k}.wav"))
 
-    def _use_voice(self, ref_bytes, exaggeration):
+    # ---------- voices ----------
+    def _ref_bytes(self, voice_key):
+        """Returns reference audio bytes for a voice key, or None for the built-in voice."""
+        if voice_key in ("", "default", None):
+            return None
+        if voice_key in PRESETS:
+            path = f"{REF_DIR}/{voice_key}.wav"
+            try:
+                with open(path, "rb") as f:
+                    return f.read()
+            except FileNotFoundError:
+                raise KeyError(voice_key)
+        if voice_key.startswith("u-"):
+            data = voices_store.get(voice_key)
+            if data is None:
+                raise KeyError(voice_key)
+            return data
+        raise KeyError(voice_key)
+
+    def _use_voice(self, voice_key, ref_bytes, exaggeration):
         import copy
-        import hashlib
         import os
         import tempfile
 
-        if not ref_bytes:
+        if ref_bytes is None:
             self.model.conds = copy.deepcopy(self.default_conds)
             return
-        key = hashlib.sha256(ref_bytes).hexdigest()
-        if key in self.cond_cache:
-            self.model.conds = copy.deepcopy(self.cond_cache[key])
+        if voice_key in self.cond_cache:
+            self.model.conds = copy.deepcopy(self.cond_cache[voice_key])
             return
-        fd, path = tempfile.mkstemp(suffix=".wav")
+        fd, path = tempfile.mkstemp(suffix=".audio")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(ref_bytes)
             self.model.prepare_conditionals(path, exaggeration=exaggeration)
         finally:
             os.remove(path)
-        if len(self.cond_cache) >= 16:
+        if len(self.cond_cache) >= 24:
             self.cond_cache.pop(next(iter(self.cond_cache)))
-        self.cond_cache[key] = copy.deepcopy(self.model.conds)
+        self.cond_cache[voice_key] = copy.deepcopy(self.model.conds)
 
-    def synthesize(self, chunks, language, exaggeration, cfg_weight, ref_bytes):
+    def synthesize(self, text, language, exaggeration, cfg_weight, voice_key):
         import io
         import numpy as np
         import soundfile as sf
 
-        sr = self.model.sr
-        gap = np.zeros(int(sr * 0.22), dtype=np.float32)
-        parts = []
+        ref = self._ref_bytes(voice_key)  # KeyError -> unknown voice
         with self.lock:
-            self._use_voice(ref_bytes, exaggeration)
-            for i, text in enumerate(chunks):
-                wav = self.model.generate(
-                    text,
-                    language_id=language,
-                    exaggeration=exaggeration,
-                    cfg_weight=cfg_weight,
-                )
-                parts.append(wav.squeeze(0).numpy().astype(np.float32))
-                if i < len(chunks) - 1:
-                    parts.append(gap)
-        audio = np.concatenate(parts) if parts else np.zeros(1, dtype=np.float32)
+            self._use_voice(voice_key or "default", ref, exaggeration)
+            wav = self.model.generate(text, language_id=language, exaggeration=exaggeration, cfg_weight=cfg_weight)
+        audio = wav.squeeze(0).numpy().astype(np.float32)
         buf = io.BytesIO()
-        sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
-        return buf.getvalue(), len(audio) / sr
+        sf.write(buf, audio, self.model.sr, format="WAV", subtype="PCM_16")
+        return buf.getvalue(), len(audio) / self.model.sr
 
     @modal.asgi_app(label="sawti")
     def web(self):
         import base64
+        import hashlib
         import hmac
         import os
+        from urllib.parse import unquote
 
         from fastapi import FastAPI, Header, HTTPException, Request
         from fastapi.concurrency import run_in_threadpool
@@ -139,7 +188,8 @@ class TTS:
         from fastapi.responses import Response
         from chatterbox.mtl_tts import SUPPORTED_LANGUAGES
 
-        password = os.environ.get("SAWTI_PASSWORD", "")
+        # strip: a secret pasted with a trailing newline or space must still match
+        password = os.environ.get("SAWTI_PASSWORD", "").strip()
         api = FastAPI(title="sawti-tts", docs_url=None, redoc_url=None)
         api.add_middleware(
             CORSMiddleware,
@@ -151,9 +201,15 @@ class TTS:
         )
 
         def check_auth(authorization):
-            given = (authorization or "").removeprefix("Bearer ").strip()
+            given = unquote((authorization or "").removeprefix("Bearer ").strip()).strip()
             if not password or not hmac.compare_digest(given.encode(), password.encode()):
                 raise HTTPException(status_code=401, detail="wrong password")
+
+        async def read_json(request):
+            try:
+                return await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="invalid JSON")
 
         @api.get("/health")
         def health():
@@ -162,39 +218,44 @@ class TTS:
         @api.get("/check")
         def check(authorization: str = Header(default="")):
             check_auth(authorization)
-            return {"ok": True, "languages": sorted(SUPPORTED_LANGUAGES)}
+            return {"ok": True, "languages": sorted(SUPPORTED_LANGUAGES), "presets": self.presets}
+
+        @api.post("/voice")
+        async def add_voice(request: Request, authorization: str = Header(default="")):
+            check_auth(authorization)
+            body = await read_json(request)
+            try:
+                data = base64.b64decode(body.get("ref_audio", ""), validate=True)
+            except Exception:
+                raise HTTPException(status_code=400, detail="bad ref_audio")
+            if not data:
+                raise HTTPException(status_code=400, detail="empty ref_audio")
+            if len(data) > MAX_REF_BYTES:
+                raise HTTPException(status_code=413, detail="ref_audio too large")
+            key = "u-" + hashlib.sha256(data).hexdigest()[:32]
+            if await voices_store.get.aio(key) is None:
+                await voices_store.put.aio(key, data)
+            return {"voice_key": key}
 
         @api.post("/tts")
         async def tts(request: Request, authorization: str = Header(default="")):
             check_auth(authorization)
-            try:
-                body = await request.json()
-            except Exception:
-                raise HTTPException(status_code=400, detail="invalid JSON")
-
-            chunks = [str(c).strip() for c in body.get("chunks", []) if str(c).strip()]
-            if not chunks:
+            body = await read_json(request)
+            text = str(body.get("text") or " ".join(str(c) for c in body.get("chunks", []))).strip()
+            if not text:
                 raise HTTPException(status_code=400, detail="no text")
-            if sum(len(c) for c in chunks) > MAX_CHARS or any(len(c) > MAX_CHUNK_CHARS for c in chunks):
+            if len(text) > MAX_TEXT_CHARS:
                 raise HTTPException(status_code=413, detail="text too long")
             language = str(body.get("language", "ar")).lower()
             if language not in SUPPORTED_LANGUAGES:
                 raise HTTPException(status_code=400, detail="unsupported language")
             exaggeration = min(max(float(body.get("exaggeration", 0.5)), 0.25), 2.0)
             cfg_weight = min(max(float(body.get("cfg_weight", 0.5)), 0.0), 1.0)
-
-            ref_bytes = None
-            if body.get("ref_audio"):
-                try:
-                    ref_bytes = base64.b64decode(body["ref_audio"], validate=True)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="bad ref_audio")
-                if len(ref_bytes) > MAX_REF_BYTES:
-                    raise HTTPException(status_code=413, detail="ref_audio too large")
-
-            wav, seconds = await run_in_threadpool(
-                self.synthesize, chunks, language, exaggeration, cfg_weight, ref_bytes
-            )
+            voice_key = str(body.get("voice_key") or "default")
+            try:
+                wav, seconds = await run_in_threadpool(self.synthesize, text, language, exaggeration, cfg_weight, voice_key)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="unknown voice")
             return Response(content=wav, media_type="audio/wav", headers={"X-Audio-Seconds": f"{seconds:.2f}"})
 
         return api

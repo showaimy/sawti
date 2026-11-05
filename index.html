@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <script type="module" crossorigin src="./assets/index-DrP6pJcn.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-BNpMnQW2.css">
+  <script type="module" crossorigin src="./assets/index-D-ojMX9v.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-Bzgl-VM3.css">
 </head>
 <body>
   <header class="top">
@@ -23,12 +23,13 @@
         <p class="tag">النص يتحوّل إلى صوت داخل جهازك، بدون سيرفر</p>
       </div>
     </div>
-    <span class="badge" title="بعد أول تنزيل يشتغل بدون إنترنت">يعمل على جهازك</span>
+    <span class="badge" id="runBadge">يعمل على جهازك</span>
   </header>
 
   <main class="layout">
     <section class="panel compose" aria-labelledby="composeTitle">
       <h2 id="composeTitle" class="sr-only">اكتب النص</h2>
+      <button type="button" class="srv-hint" id="srvHint" hidden>للأصوات عالية الجودة على الجوال: شغّل «السيرفر» من قسم الأصوات ↓</button>
       <div class="selected-voice" id="selectedVoice"></div>
       <label for="script" class="label">النص</label>
       <textarea id="script" dir="auto" rows="9" placeholder="اكتب النص اللي تبيه يتحوّل لصوت..."></textarea>

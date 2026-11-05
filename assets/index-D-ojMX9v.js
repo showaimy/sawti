@@ -5748,15 +5748,22 @@ async function fetchWithTimeout(url, opts = {}, ms = 24e4) {
     clearTimeout(t);
   }
 }
+const authHeader = (pw = server.password) => ({ Authorization: `Bearer ${encodeURIComponent(String(pw).trim())}` });
+let serverInfo = null;
 async function serverCheck(password = server.password) {
   let res;
   try {
-    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: { Authorization: `Bearer ${password}` } }, 18e4);
+    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: authHeader(password) }, 18e4);
   } catch {
     throw new Error("SERVER_UNREACHABLE");
   }
   if (res.status === 401) throw new Error("SERVER_BAD_PASSWORD");
   if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  try {
+    serverInfo = await res.json();
+  } catch {
+    serverInfo = { presets: [] };
+  }
   return true;
 }
 function toBase64(bytes) {
@@ -5765,31 +5772,117 @@ function toBase64(bytes) {
   for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
   return btoa(bin);
 }
-async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
-  const preset = PRESETS.find((p) => p.id === voice.id);
-  let ref = null;
-  if (voice.id !== DEFAULT_VOICE.id) {
-    const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
-    const wav = await encodeWav(samples, 24e3).arrayBuffer();
-    ref = toBase64(new Uint8Array(wav));
+function parseWav(buf) {
+  const v = new DataView(buf);
+  let off = 12, rate = 24e3, data = null;
+  while (off + 8 <= v.byteLength) {
+    const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
+    const size = v.getUint32(off + 4, true);
+    if (id === "fmt ") rate = v.getUint32(off + 12, true);
+    if (id === "data") {
+      data = new Int16Array(buf.slice(off + 8, off + 8 + Math.min(size, v.byteLength - off - 8)));
+      break;
+    }
+    off += 8 + size + size % 2;
   }
-  onProgress?.({ stage: "server", count: chunks.length });
+  if (!data) throw new Error("SERVER_ERROR bad audio");
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i] / 32768;
+  return { samples: out, rate };
+}
+const KEY_STORE = "sawt.serverVoiceKeys";
+function savedKeys() {
+  try {
+    return JSON.parse(localStorage.getItem(KEY_STORE) || "{}");
+  } catch {
+    return {};
+  }
+}
+function saveKey(id, key) {
+  try {
+    const k = savedKeys();
+    if (key) k[id] = key;
+    else delete k[id];
+    localStorage.setItem(KEY_STORE, JSON.stringify(k));
+  } catch {
+  }
+}
+async function uploadVoice(voice, onProgress) {
+  const preset = PRESETS.find((p) => p.id === voice.id);
+  const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
+  if (!samples?.length) throw new Error("ملف الصوت فاضي");
+  onProgress?.({ stage: "server-voice" });
+  const wav = new Uint8Array(await encodeWav(samples, 24e3).arrayBuffer());
   let res;
   try {
-    res = await fetchWithTimeout(`${SERVER_URL}/tts`, {
+    res = await fetchWithTimeout(`${SERVER_URL}/voice`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${server.password}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ chunks, language, exaggeration, ref_audio: ref })
-    }, 6e5);
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ref_audio: toBase64(wav) })
+    }, 18e4);
   } catch {
     throw new Error("SERVER_UNREACHABLE");
   }
   if (res.status === 401) throw new Error("SERVER_BAD_PASSWORD");
-  if (res.status === 413) throw new Error("SERVER_TOO_LONG");
   if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
-  const blob = await res.blob();
-  const seconds = Number(res.headers.get("X-Audio-Seconds")) || 0;
-  return { blob: new Blob([blob], { type: "audio/wav" }), seconds };
+  const { voice_key: key } = await res.json();
+  saveKey(voice.id, key);
+  return key;
+}
+async function voiceKeyFor(voice, onProgress) {
+  if (voice.id === DEFAULT_VOICE.id) return "default";
+  if (PRESETS.some((p) => p.id === voice.id)) {
+    if (!serverInfo) {
+      try {
+        await serverCheck();
+      } catch {
+      }
+    }
+    if (serverInfo?.presets?.includes(voice.id)) return voice.id;
+  }
+  return savedKeys()[voice.id] || uploadVoice(voice, onProgress);
+}
+async function postTts(body) {
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/tts`, {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }, 24e4);
+  } catch {
+    throw new Error("SERVER_UNREACHABLE");
+  }
+  return res;
+}
+async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  let key = await voiceKeyFor(voice, onProgress);
+  const parts = [];
+  let rate = 24e3;
+  for (let i = 0; i < chunks.length; i++) {
+    onProgress?.({ stage: "server", index: i + 1, count: chunks.length });
+    let res = await postTts({ text: chunks[i], language, exaggeration, voice_key: key });
+    if (res.status === 404 && key !== "default") {
+      saveKey(voice.id, null);
+      key = await uploadVoice(voice, onProgress);
+      res = await postTts({ text: chunks[i], language, exaggeration, voice_key: key });
+    }
+    if (res.status === 401) throw new Error("SERVER_BAD_PASSWORD");
+    if (res.status === 413) throw new Error("SERVER_TOO_LONG");
+    if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+    const wav = parseWav(await res.arrayBuffer());
+    rate = wav.rate;
+    parts.push(wav.samples);
+    if (i < chunks.length - 1) parts.push(new Float32Array(Math.round(rate * 0.22)));
+  }
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const merged = new Float32Array(total);
+  let off = 0;
+  for (const p of parts) {
+    merged.set(p, off);
+    off += p.length;
+  }
+  return { blob: encodeWav(merged, rate), seconds: total / rate };
 }
 let worker = null;
 let seq = 0;
@@ -5876,6 +5969,7 @@ async function hqSynthesize({ chunks, language, voice, exaggeration }, onProgres
 }
 function hqForget(voiceId) {
   worker?.postMessage({ type: "forget", voiceKey: voiceId });
+  saveKey(voiceId, null);
 }
 const DB = "sawt";
 const STORE = "history";
@@ -6147,12 +6241,31 @@ function voiceButton({ id, name, desc, state, stateReady, onDelete, onPreview })
   if (tools.childElementCount) li.append(tools);
   return li;
 }
-let previewAudio = null;
-function playBlob(blob) {
-  previewAudio?.pause();
-  previewAudio = new Audio(URL.createObjectURL(blob));
-  previewAudio.play().catch(() => {
-  });
+const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+const previewAudio = new Audio();
+previewAudio.preload = "auto";
+let previewUrl = null;
+function unlockPreview() {
+  try {
+    previewAudio.src = SILENCE;
+    const p = previewAudio.play();
+    p?.catch?.(() => {
+    });
+  } catch {
+  }
+}
+function playBlob(blob, label) {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(blob);
+  previewAudio.pause();
+  previewAudio.src = previewUrl;
+  const p = previewAudio.play();
+  if (p?.catch) p.catch(() => showSampleInPlayer(blob, label));
+}
+function showSampleInPlayer(blob, label) {
+  showResult(blob, `عيّنة: ${label || ""}`, 0);
+  els.resultMeta.textContent = `عيّنة: ${label || ""} · اضغط ▶`;
+  els.result.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 const SAMPLE_LINES = {
   ar: "أهلاً وسهلاً، هذا صوتي. أقدر أقرأ لك أي نص تبيه بوضوح وهدوء.",
@@ -6169,6 +6282,7 @@ async function sampleCache() {
 const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(id)}/${lang}${isHqId(id) && serverActive() ? "/srv" : ""}`;
 async function previewVoice(id, btn) {
   if (busy) return;
+  unlockPreview();
   const hq = isHqId(id);
   const voice = anyVoice(id);
   const lang = hq ? hqLang : voice.lang;
@@ -6176,7 +6290,7 @@ async function previewVoice(id, btn) {
   const key = sampleKey(id, lang);
   const hit = cache && await cache.match(key);
   if (hit) {
-    playBlob(await hit.blob());
+    playBlob(await hit.blob(), voice.name);
     return;
   }
   if (hq && !support.ok) {
@@ -6193,8 +6307,13 @@ async function previewVoice(id, btn) {
     if (!hq) {
       downloaded.add(id);
     }
-    if (cache) await cache.put(key, new Response(out.blob, { headers: { "content-type": "audio/wav" } }));
-    playBlob(out.blob);
+    if (cache) {
+      try {
+        await cache.put(key, new Response(out.blob, { headers: { "content-type": "audio/wav" } }));
+      } catch {
+      }
+    }
+    playBlob(out.blob, voice.name);
   } catch (e) {
     console.error(e);
     showError(friendlyError(e));
@@ -6283,10 +6402,22 @@ function renderCompose() {
   els.arHint.hidden = lang !== "ar";
   els.generate.disabled = busy || hq && !support.ok;
 }
+function renderTop() {
+  const onServer = serverActive();
+  const badge = document.getElementById("runBadge");
+  badge.textContent = onServer && isHqId(selectedId) ? "يعمل على السيرفر" : "يعمل على جهازك";
+  const hint = document.getElementById("srvHint");
+  hint.hidden = onServer || support.ok || !/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+}
+document.getElementById("srvHint").addEventListener("click", () => {
+  setTab("hq");
+  els.paneHq.scrollIntoView({ behavior: "smooth", block: "start" });
+});
 function renderAll() {
   renderHqList();
   renderFastList();
   renderCompose();
+  renderTop();
 }
 function updateCount() {
   els.charCount.textContent = `${els.script.value.trim().length.toLocaleString("ar")} حرف`;
@@ -6324,8 +6455,12 @@ function showProgress(p) {
     els.bar.style.width = `${pct}%`;
     els.progressText.textContent = `تنزيل المحرك لأول مرة... ${pct}% (${mb(p.loaded)} من ${mb(p.total)} ميجا). المرات الجاية ما يحتاج تنزيل.`;
   } else if (p.stage === "server") {
-    els.bar.style.width = "60%";
-    els.progressText.textContent = "السيرفر يولّد الصوت... (إذا كان طافي، يشتغل خلال دقيقة تقريباً)";
+    const n = p.count || 1, i = p.index || 1;
+    els.bar.style.width = `${Math.max(5, Math.round((i - 1) / n * 100))}%`;
+    const part = n > 1 ? ` جزء ${i} من ${n}` : "";
+    els.progressText.textContent = i === 1 ? `السيرفر يولّد الصوت...${part} (إذا كان طافي، يشتغل خلال دقيقة تقريباً)` : `السيرفر يولّد الصوت...${part}`;
+  } else if (p.stage === "server-voice") {
+    els.progressText.textContent = "أرفع الصوت للسيرفر (مرة وحدة بس)...";
   } else if (p.stage === "retry") {
     els.progressText.textContent = `انقطع الاتصال، أعيد المحاولة (${p.attempt})... التنزيل يكمل من نفس النقطة.`;
   } else if (p.stage === "voice-download") {

@@ -55,16 +55,21 @@ async function fetchWithTimeout(url, opts = {}, ms = 240000) {
   try { return await fetch(url, { ...opts, signal: ctl.signal }); } finally { clearTimeout(t); }
 }
 
+// Any characters work in the password (Arabic too): headers only carry Latin-1, so it is URL-encoded.
+const authHeader = (pw = server.password) => ({ Authorization: `Bearer ${encodeURIComponent(String(pw).trim())}` });
+let serverInfo = null; // { presets: [...] } from /check
+
 /** Checks the password; also wakes the GPU up. */
 export async function serverCheck(password = server.password) {
   let res;
   try {
-    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: { Authorization: `Bearer ${password}` } }, 180000);
+    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: authHeader(password) }, 180000);
   } catch {
     throw new Error('SERVER_UNREACHABLE');
   }
   if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
   if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  try { serverInfo = await res.json(); } catch { serverInfo = { presets: [] }; }
   return true;
 }
 
@@ -75,31 +80,96 @@ function toBase64(bytes) {
   return btoa(bin);
 }
 
-async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
-  const preset = PRESETS.find((p) => p.id === voice.id);
-  let ref = null;
-  if (voice.id !== DEFAULT_VOICE.id) {
-    const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
-    const wav = await encodeWav(samples, 24000).arrayBuffer();
-    ref = toBase64(new Uint8Array(wav));
+// 16-bit PCM WAV -> Float32 samples
+function parseWav(buf) {
+  const v = new DataView(buf);
+  let off = 12, rate = 24000, data = null;
+  while (off + 8 <= v.byteLength) {
+    const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
+    const size = v.getUint32(off + 4, true);
+    if (id === 'fmt ') rate = v.getUint32(off + 12, true);
+    if (id === 'data') { data = new Int16Array(buf.slice(off + 8, off + 8 + Math.min(size, v.byteLength - off - 8))); break; }
+    off += 8 + size + (size % 2);
   }
-  onProgress?.({ stage: 'server', count: chunks.length });
+  if (!data) throw new Error('SERVER_ERROR bad audio');
+  const out = new Float32Array(data.length);
+  for (let i = 0; i < data.length; i++) out[i] = data[i] / 32768;
+  return { samples: out, rate };
+}
+
+// Custom voices are uploaded once; the server keeps them and we remember the key per voice.
+const KEY_STORE = 'sawt.serverVoiceKeys';
+function savedKeys() { try { return JSON.parse(localStorage.getItem(KEY_STORE) || '{}'); } catch { return {}; } }
+function saveKey(id, key) { try { const k = savedKeys(); if (key) k[id] = key; else delete k[id]; localStorage.setItem(KEY_STORE, JSON.stringify(k)); } catch { /* ignore */ } }
+
+async function uploadVoice(voice, onProgress) {
+  const preset = PRESETS.find((p) => p.id === voice.id);
+  const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
+  if (!samples?.length) throw new Error('ملف الصوت فاضي');
+  onProgress?.({ stage: 'server-voice' });
+  const wav = new Uint8Array(await encodeWav(samples, 24000).arrayBuffer());
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/voice`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref_audio: toBase64(wav) }),
+    }, 180000);
+  } catch { throw new Error('SERVER_UNREACHABLE'); }
+  if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
+  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  const { voice_key: key } = await res.json();
+  saveKey(voice.id, key);
+  return key;
+}
+
+async function voiceKeyFor(voice, onProgress) {
+  if (voice.id === DEFAULT_VOICE.id) return 'default';
+  if (PRESETS.some((p) => p.id === voice.id)) {
+    if (!serverInfo) { try { await serverCheck(); } catch { /* handled by the request below */ } }
+    if (serverInfo?.presets?.includes(voice.id)) return voice.id; // ready on the server: nothing to send
+  }
+  return savedKeys()[voice.id] || uploadVoice(voice, onProgress);
+}
+
+async function postTts(body) {
   let res;
   try {
     res = await fetchWithTimeout(`${SERVER_URL}/tts`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${server.password}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chunks, language, exaggeration, ref_audio: ref }),
-    }, 600000);
-  } catch {
-    throw new Error('SERVER_UNREACHABLE');
+      headers: { ...authHeader(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, 240000);
+  } catch { throw new Error('SERVER_UNREACHABLE'); }
+  return res;
+}
+
+async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  let key = await voiceKeyFor(voice, onProgress);
+  const parts = [];
+  let rate = 24000;
+  for (let i = 0; i < chunks.length; i++) {
+    onProgress?.({ stage: 'server', index: i + 1, count: chunks.length });
+    let res = await postTts({ text: chunks[i], language, exaggeration, voice_key: key });
+    if (res.status === 404 && key !== 'default') {
+      // the server lost this voice (or a ready voice is missing there): send it again once
+      saveKey(voice.id, null);
+      key = await uploadVoice(voice, onProgress);
+      res = await postTts({ text: chunks[i], language, exaggeration, voice_key: key });
+    }
+    if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
+    if (res.status === 413) throw new Error('SERVER_TOO_LONG');
+    if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+    const wav = parseWav(await res.arrayBuffer());
+    rate = wav.rate;
+    parts.push(wav.samples);
+    if (i < chunks.length - 1) parts.push(new Float32Array(Math.round(rate * 0.22)));
   }
-  if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
-  if (res.status === 413) throw new Error('SERVER_TOO_LONG');
-  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
-  const blob = await res.blob();
-  const seconds = Number(res.headers.get('X-Audio-Seconds')) || 0;
-  return { blob: new Blob([blob], { type: 'audio/wav' }), seconds };
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const merged = new Float32Array(total);
+  let off = 0;
+  for (const p of parts) { merged.set(p, off); off += p.length; }
+  return { blob: encodeWav(merged, rate), seconds: total / rate };
 }
 
 let worker = null;
@@ -176,4 +246,4 @@ export async function hqSynthesize({ chunks, language, voice, exaggeration }, on
   return { blob: encodeWav(samples, sampleRate), seconds: samples.length / sampleRate };
 }
 
-export function hqForget(voiceId) { worker?.postMessage({ type: 'forget', voiceKey: voiceId }); }
+export function hqForget(voiceId) { worker?.postMessage({ type: 'forget', voiceKey: voiceId }); saveKey(voiceId, null); }

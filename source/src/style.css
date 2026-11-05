@@ -152,3 +152,4 @@ select:focus, input[type=text]:focus { border-color: var(--accent); outline: non
 .nowrap { flex-wrap: nowrap; }
 .ok { color: var(--success); font-weight: 600; }
 .bad { color: var(--danger); font-weight: 600; }
+.srv-hint { width: 100%; text-align: start; margin-bottom: 12px; padding: 10px 14px; border: 1px dashed var(--accent); border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: 14px; cursor: pointer; }
