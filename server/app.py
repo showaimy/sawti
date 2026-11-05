@@ -232,8 +232,13 @@ image = (
     .apt_install("ffmpeg", "libsndfile1")
     .pip_install(
         "chatterbox-tts==0.1.7", "fastapi[standard]==0.115.12", "soundfile", "piper-tts==1.8.0",
-        "habibi-tts==0.1.1", "datasets>=3.0",  # without the datasets floor, pip falls back to an ancient release
+        "habibi-tts==0.1.1",
+        # pinned so they work with NumPy 1.26 (Chatterbox needs NumPy < 2); newer pyarrow needs NumPy 2
+        "datasets==4.0.0", "pyarrow==20.0.0",
     )
+    # torchcodec comes in with F5-TTS but its current build needs a newer PyTorch/CUDA than Chatterbox's.
+    # Nothing here uses it, and transformers falls back to other audio readers without it.
+    .run_commands("pip uninstall -y torchcodec")
     .env({"HF_HOME": MODEL_DIR, "HF_HUB_DISABLE_TELEMETRY": "1"})
     .run_function(download_weights)   # weights baked into the image: faster cold starts
     .run_function(make_preset_refs)   # ready-made voice clips baked in too
@@ -376,7 +381,10 @@ class TTS:
                 self.asr = pipeline("automatic-speech-recognition", model=WHISPER_REPO, dtype=torch.float16, device="cuda")
             except TypeError:  # older transformers
                 self.asr = pipeline("automatic-speech-recognition", model=WHISPER_REPO, torch_dtype=torch.float16, device="cuda")
-        out = self.asr(path, chunk_length_s=30, return_timestamps=False,
+        import soundfile as sf
+
+        audio, sr = sf.read(path, dtype="float32", always_2d=True)  # samples, not a file path: no decoder needed
+        out = self.asr({"raw": audio.mean(axis=1), "sampling_rate": sr}, chunk_length_s=30, return_timestamps=False,
                        generate_kwargs={"task": "transcribe", "language": "arabic"})
         return out["text"].strip()
 
@@ -440,21 +448,26 @@ class TTS:
             ("chatterbox-saudi", lambda: self.synthesize(text, "ar", 0.5, 0.5, "hq-p-kareem", "saudi", 0.8)),
             ("habibi-saudi", lambda: self.synthesize_habibi(text, "saudi", 1.0, "hq-p-kareem")),
         ]
+        import traceback
+
         out = []
         for name, job in jobs:
             try:
                 wav, secs = job()
+            except Exception as e:
+                traceback.print_exc()
+                out.append({"name": name, "error": f"generating: {type(e).__name__}: {e}"})
+                continue
+            try:
                 fd, path = tempfile.mkstemp(suffix=".wav")
                 with os.fdopen(fd, "wb") as f:
                     f.write(wav)
                 heard = self._transcribe(path)
                 os.remove(path)
-                out.append({"name": name, "seconds": round(secs, 2), "heard": heard, "wav": wav})
             except Exception as e:
-                import traceback
-
                 traceback.print_exc()
-                out.append({"name": name, "error": f"{type(e).__name__}: {e}"})
+                heard = f"(could not transcribe: {type(e).__name__}: {e})"
+            out.append({"name": name, "seconds": round(secs, 2), "heard": heard, "wav": wav})
         return out
 
     def synthesize(self, text, language, exaggeration, cfg_weight, voice_key, dialect="saudi", temperature=0.8):
