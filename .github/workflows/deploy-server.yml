@@ -16,9 +16,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,18 +23,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check secrets are set
+      - name: Check secrets and read the Modal token
+        # Accepts the bare values, or the whole "modal token set --token-id ak-... --token-secret as-..." line.
         env:
+          RAW_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          RAW_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           SAWTI_PASSWORD: ${{ secrets.SAWTI_PASSWORD }}
         run: |
           missing=""
-          [ -z "$MODAL_TOKEN_ID" ] && missing="$missing MODAL_TOKEN_ID"
-          [ -z "$MODAL_TOKEN_SECRET" ] && missing="$missing MODAL_TOKEN_SECRET"
+          [ -z "$RAW_ID" ] && missing="$missing MODAL_TOKEN_ID"
+          [ -z "$RAW_SECRET" ] && missing="$missing MODAL_TOKEN_SECRET"
           [ -z "$SAWTI_PASSWORD" ] && missing="$missing SAWTI_PASSWORD"
           if [ -n "$missing" ]; then
             echo "::error::Missing repository secrets:$missing (Settings > Secrets and variables > Actions)"
             exit 1
           fi
+          id=$(printf '%s %s' "$RAW_ID" "$RAW_SECRET" | grep -oE 'ak-[A-Za-z0-9]+' | head -n1)
+          secret=$(printf '%s %s' "$RAW_SECRET" "$RAW_ID" | grep -oE 'as-[A-Za-z0-9]+' | head -n1)
+          if [ -z "$id" ]; then echo "::error::MODAL_TOKEN_ID must contain the token id that starts with ak-"; exit 1; fi
+          if [ -z "$secret" ]; then echo "::error::MODAL_TOKEN_SECRET must contain the token secret that starts with as-"; exit 1; fi
+          echo "::add-mask::$id"
+          echo "::add-mask::$secret"
+          echo "Token id: ak-... (${#id} chars), token secret: as-... (${#secret} chars)"
+          echo "MODAL_TOKEN_ID=$id" >> "$GITHUB_ENV"
+          echo "MODAL_TOKEN_SECRET=$secret" >> "$GITHUB_ENV"
 
       - name: Install Modal
         run: pip install "modal>=1.0,<2"
