@@ -122,6 +122,21 @@ def number_words(n, saudi=True):
     return " و".join(out)
 
 
+def wav_bytes(audio, sr):
+    """Float samples -> 16-bit WAV, turned down a little if any peak would clip."""
+    import io
+    import numpy as np
+    import soundfile as sf
+
+    audio = np.asarray(audio, dtype=np.float32)
+    peak = float(np.abs(audio).max()) if audio.size else 0.0
+    if peak > 0.95:
+        audio = audio * (0.95 / peak)
+    buf = io.BytesIO()
+    sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
+    return buf.getvalue()
+
+
 def _digits_one_by_one(s):
     return " ".join("صفر" if d == "0" else _ONES[int(d)] for d in s)
 
@@ -413,10 +428,6 @@ class TTS:
         return trimmed, ref_text
 
     def synthesize_habibi(self, text, dialect, speed, voice_key):
-        import io
-        import numpy as np
-        import soundfile as sf
-
         if voice_key not in HABIBI_PRESETS and not voice_key.startswith("u-"):
             raise VoiceNotArabic(voice_key)
         ref = self._ref_bytes(voice_key)  # KeyError -> unknown voice
@@ -433,10 +444,7 @@ class TTS:
                 show_info=lambda *a, **k: None, progress=None, nfe_step=32, cfg_strength=2.0,
                 speed=speed, device="cuda", dialect_id=dialect_id_map["SAU" if saudi else "MSA"],
             )
-        audio = np.asarray(wave, dtype=np.float32)
-        buf = io.BytesIO()
-        sf.write(buf, audio, sr, format="WAV", subtype="PCM_16")
-        return buf.getvalue(), len(audio) / sr
+        return wav_bytes(wave, sr), len(wave) / sr
 
     @modal.method()
     def selftest(self, text="هلا والله! تدري إن قلة النوم تأثر على مزاجك وتركيزك في الشغل؟ نصيحتنا لك: نام من 7 إلى 8 ساعات، وابعد الجوال قبل النوم بنص ساعة."):
@@ -471,9 +479,7 @@ class TTS:
         return out
 
     def synthesize(self, text, language, exaggeration, cfg_weight, voice_key, dialect="saudi", temperature=0.8):
-        import io
         import numpy as np
-        import soundfile as sf
 
         ref = self._ref_bytes(voice_key)  # KeyError -> unknown voice
         # Chatterbox guidance: when the reference voice speaks another language, cfg_weight=0 avoids
@@ -490,9 +496,7 @@ class TTS:
             wav = self.model.generate(text, language_id=language, exaggeration=exaggeration,
                                       cfg_weight=cfg_weight, temperature=temperature)
         audio = wav.squeeze(0).numpy().astype(np.float32)
-        buf = io.BytesIO()
-        sf.write(buf, audio, self.model.sr, format="WAV", subtype="PCM_16")
-        return buf.getvalue(), len(audio) / self.model.sr
+        return wav_bytes(audio, self.model.sr), len(audio) / self.model.sr
 
     @modal.asgi_app(label="sawti")
     def web(self):
