@@ -38,6 +38,70 @@ async function loadPresetAudio(p, onProgress) {
   return clip;
 }
 
+// ---------- remote server (Modal) ----------
+export const SERVER_URL = 'https://showaimy--sawti.modal.run';
+const server = { enabled: false, password: '' };
+try { Object.assign(server, JSON.parse(localStorage.getItem('sawt.server') || '{}')); } catch { /* ignore */ }
+export function getServer() { return { ...server }; }
+export function setServer(patch) {
+  Object.assign(server, patch);
+  try { localStorage.setItem('sawt.server', JSON.stringify(server)); } catch { /* ignore */ }
+}
+export const serverActive = () => server.enabled && !!server.password;
+
+async function fetchWithTimeout(url, opts = {}, ms = 240000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctl.signal }); } finally { clearTimeout(t); }
+}
+
+/** Checks the password; also wakes the GPU up. */
+export async function serverCheck(password = server.password) {
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: { Authorization: `Bearer ${password}` } }, 180000);
+  } catch {
+    throw new Error('SERVER_UNREACHABLE');
+  }
+  if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
+  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  return true;
+}
+
+function toBase64(bytes) {
+  let bin = '';
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  return btoa(bin);
+}
+
+async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  const preset = PRESETS.find((p) => p.id === voice.id);
+  let ref = null;
+  if (voice.id !== DEFAULT_VOICE.id) {
+    const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
+    const wav = await encodeWav(samples, 24000).arrayBuffer();
+    ref = toBase64(new Uint8Array(wav));
+  }
+  onProgress?.({ stage: 'server', count: chunks.length });
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/tts`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${server.password}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chunks, language, exaggeration, ref_audio: ref }),
+    }, 600000);
+  } catch {
+    throw new Error('SERVER_UNREACHABLE');
+  }
+  if (res.status === 401) throw new Error('SERVER_BAD_PASSWORD');
+  if (res.status === 413) throw new Error('SERVER_TOO_LONG');
+  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  const blob = await res.blob();
+  const seconds = Number(res.headers.get('X-Audio-Seconds')) || 0;
+  return { blob: new Blob([blob], { type: 'audio/wav' }), seconds };
+}
+
 let worker = null;
 let seq = 0;
 const pending = new Map();
@@ -64,6 +128,7 @@ function getWorker() {
 }
 
 export async function hqSupport() {
+  if (serverActive()) return { ok: true, server: true };
   if (!('gpu' in navigator)) return { ok: false, reason: 'متصفحك ما يدعم WebGPU. استخدم Chrome أو Edge على كمبيوتر.' };
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -98,6 +163,7 @@ function call(msg, transfer, onProgress) {
  * @param {{chunks:string[], language:string, voice:{id:string, samples?:Float32Array}, exaggeration:number}} o
  */
 export async function hqSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  if (serverActive()) return serverSynthesize({ chunks, language, voice, exaggeration }, onProgress);
   const preset = PRESETS.find((p) => p.id === voice.id);
   const audio = voice.id === DEFAULT_VOICE.id ? await loadDefaultAudio() : preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
   if (!audio?.length) throw new Error('ملف الصوت فاضي');

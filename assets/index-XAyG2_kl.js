@@ -5722,6 +5722,75 @@ async function loadPresetAudio(p, onProgress) {
   presetAudio.set(p.id, clip2);
   return clip2;
 }
+const SERVER_URL = "https://showaimy--sawti.modal.run";
+const server = { enabled: false, password: "" };
+try {
+  Object.assign(server, JSON.parse(localStorage.getItem("sawt.server") || "{}"));
+} catch {
+}
+function getServer() {
+  return { ...server };
+}
+function setServer(patch) {
+  Object.assign(server, patch);
+  try {
+    localStorage.setItem("sawt.server", JSON.stringify(server));
+  } catch {
+  }
+}
+const serverActive = () => server.enabled && !!server.password;
+async function fetchWithTimeout(url, opts = {}, ms = 24e4) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+async function serverCheck(password = server.password) {
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/check`, { headers: { Authorization: `Bearer ${password}` } }, 18e4);
+  } catch {
+    throw new Error("SERVER_UNREACHABLE");
+  }
+  if (res.status === 401) throw new Error("SERVER_BAD_PASSWORD");
+  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  return true;
+}
+function toBase64(bytes) {
+  let bin = "";
+  const step = 32768;
+  for (let i = 0; i < bytes.length; i += step) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+  return btoa(bin);
+}
+async function serverSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  const preset = PRESETS.find((p) => p.id === voice.id);
+  let ref = null;
+  if (voice.id !== DEFAULT_VOICE.id) {
+    const samples = preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
+    const wav = await encodeWav(samples, 24e3).arrayBuffer();
+    ref = toBase64(new Uint8Array(wav));
+  }
+  onProgress?.({ stage: "server", count: chunks.length });
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SERVER_URL}/tts`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${server.password}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ chunks, language, exaggeration, ref_audio: ref })
+    }, 6e5);
+  } catch {
+    throw new Error("SERVER_UNREACHABLE");
+  }
+  if (res.status === 401) throw new Error("SERVER_BAD_PASSWORD");
+  if (res.status === 413) throw new Error("SERVER_TOO_LONG");
+  if (!res.ok) throw new Error(`SERVER_ERROR ${res.status}`);
+  const blob = await res.blob();
+  const seconds = Number(res.headers.get("X-Audio-Seconds")) || 0;
+  return { blob: new Blob([blob], { type: "audio/wav" }), seconds };
+}
 let worker = null;
 let seq = 0;
 const pending = /* @__PURE__ */ new Map();
@@ -5757,6 +5826,7 @@ function getWorker() {
   return worker;
 }
 async function hqSupport() {
+  if (serverActive()) return { ok: true, server: true };
   if (!("gpu" in navigator)) return { ok: false, reason: "متصفحك ما يدعم WebGPU. استخدم Chrome أو Edge على كمبيوتر." };
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -5792,6 +5862,7 @@ function call(msg, transfer, onProgress) {
   });
 }
 async function hqSynthesize({ chunks, language, voice, exaggeration }, onProgress) {
+  if (serverActive()) return serverSynthesize({ chunks, language, voice, exaggeration }, onProgress);
   const preset = PRESETS.find((p) => p.id === voice.id);
   const audio = voice.id === DEFAULT_VOICE.id ? await loadDefaultAudio() : preset ? await loadPresetAudio(preset, onProgress) : voice.samples;
   if (!audio?.length) throw new Error("ملف الصوت فاضي");
@@ -5962,6 +6033,72 @@ els.language.addEventListener("change", () => {
   savePrefs();
   renderCompose();
 });
+const runEls = {
+  btns: document.querySelectorAll(".seg-btn"),
+  hint: document.getElementById("runHint"),
+  form: document.getElementById("serverForm"),
+  pass: document.getElementById("serverPass"),
+  connect: document.getElementById("serverConnect"),
+  status: document.getElementById("serverStatus")
+};
+function renderRun() {
+  const srv = getServer();
+  const mode = srv.enabled ? "server" : "device";
+  runEls.btns.forEach((b) => b.setAttribute("aria-checked", String(b.dataset.run === mode)));
+  runEls.form.hidden = mode !== "server";
+  runEls.hint.textContent = mode === "server" ? "السيرفر: يشتغل على أي جهاز حتى الجوال. أول طلب بعد فترة توقف ياخذ حتى دقيقة." : "جهازي: يحتاج كمبيوتر فيه كرت شاشة، وأول مرة ينزّل 1.5 جيجا.";
+  if (mode === "server" && srv.password && !runEls.status.textContent) {
+    runEls.status.textContent = "✓ متصل";
+    runEls.status.className = "small ok";
+  }
+}
+function setStatus(text, kind) {
+  runEls.status.textContent = text;
+  runEls.status.className = `small ${kind || ""}`;
+}
+runEls.btns.forEach((b) => b.addEventListener("click", async () => {
+  if (busy) return;
+  if (b.dataset.run === "device") {
+    setServer({ enabled: false });
+    setStatus("");
+  } else {
+    setServer({ enabled: true });
+    if (!getServer().password) {
+      setStatus("");
+      runEls.pass.focus();
+    }
+  }
+  support = await hqSupport();
+  renderRun();
+  renderAll();
+}));
+runEls.form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const pw = runEls.pass.value.trim() || getServer().password;
+  if (!pw) {
+    setStatus("اكتب كلمة المرور.", "bad");
+    return;
+  }
+  runEls.connect.disabled = true;
+  setStatus("أتصل بالسيرفر وأشغّله... ممكن ياخذ حتى دقيقة أول مرة.", "");
+  try {
+    await serverCheck(pw);
+    setServer({ enabled: true, password: pw });
+    runEls.pass.value = "";
+    setStatus("✓ متصل. السيرفر جاهز.", "ok");
+    if (!isHqId(selectedId)) {
+      selectedId = PRESETS[0].id;
+      savePrefs();
+    }
+  } catch (err) {
+    setServer({ password: "" });
+    setStatus(friendlyError(err), "bad");
+  } finally {
+    runEls.connect.disabled = false;
+    support = await hqSupport();
+    renderAll();
+  }
+});
 function setTab(t) {
   tab = t;
   els.tabHq.setAttribute("aria-selected", String(t === "hq"));
@@ -6029,7 +6166,7 @@ async function sampleCache() {
     return null;
   }
 }
-const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(id)}/${lang}`;
+const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(id)}/${lang}${isHqId(id) && serverActive() ? "/srv" : ""}`;
 async function previewVoice(id, btn) {
   if (busy) return;
   const hq = isHqId(id);
@@ -6186,6 +6323,9 @@ function showProgress(p) {
     const pct = p.total ? Math.min(100, Math.round(p.loaded / p.total * 100)) : 0;
     els.bar.style.width = `${pct}%`;
     els.progressText.textContent = `تنزيل المحرك لأول مرة... ${pct}% (${mb(p.loaded)} من ${mb(p.total)} ميجا). المرات الجاية ما يحتاج تنزيل.`;
+  } else if (p.stage === "server") {
+    els.bar.style.width = "60%";
+    els.progressText.textContent = "السيرفر يولّد الصوت... (إذا كان طافي، يشتغل خلال دقيقة تقريباً)";
   } else if (p.stage === "retry") {
     els.progressText.textContent = `انقطع الاتصال، أعيد المحاولة (${p.attempt})... التنزيل يكمل من نفس النقطة.`;
   } else if (p.stage === "voice-download") {
@@ -6211,6 +6351,10 @@ function friendlyError(e) {
   if (/Failed to fetch|NetworkError|network error|تعذّر تنزيل|Could not locate file/i.test(m)) return "انقطع التنزيل. اضغط «ولّد الصوت» مرة ثانية، والملفات اللي تنزّلت ما تتنزّل من جديد.";
   if (/QuotaExceeded|quota/i.test(m)) return "مساحة المتصفح ممتلئة. احذف أصوات ما تستخدمها.";
   if (/webgpu|GPU|adapter/i.test(m)) return "تعذّر تشغيل كرت الشاشة. جرّب Chrome أو Edge، أو استخدم الأصوات السريعة.";
+  if (/SERVER_BAD_PASSWORD/.test(m)) return "كلمة مرور السيرفر غلط. اكتبها مثل ما حطيتها في SAWTI_PASSWORD بالضبط.";
+  if (/SERVER_UNREACHABLE/.test(m)) return "ما قدرت أوصل للسيرفر. تأكد إنه انرفع على Modal، وإن عندك إنترنت، وجرّب مرة ثانية.";
+  if (/SERVER_TOO_LONG/.test(m)) return "النص طويل على السيرفر. قسّمه لأجزاء أقصر من 6,000 حرف.";
+  if (/SERVER_ERROR/.test(m)) return "صار خطأ في السيرفر (" + m.replace("SERVER_ERROR ", "") + "). جرّب مرة ثانية بعد شوي.";
   if (/SHORT_OUTPUT/.test(m)) return "المحرك طلع صوت ناقص. جرّب مرة ثانية، أو جرّب صوت ثاني، وإذا تكرر صوّر لي الرسالة: " + m;
   if (/memory|OOM|allocation/i.test(m)) return "ذاكرة الجهاز ما كفت. سكّر التبويبات الثانية وجرّب، أو قسّم النص.";
   return m;
@@ -6453,6 +6597,7 @@ async function start() {
   updateCount();
   myVoices = await listVoices();
   if (!anyVoice(selectedId)) selectedId = DEFAULT_VOICE.id;
+  renderRun();
   support = await hqSupport();
   if (!support.ok && isHqId(selectedId) && !prefs.voiceId) {
     selectedId = VOICES$1[0].id;

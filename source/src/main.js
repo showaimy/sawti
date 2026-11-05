@@ -1,5 +1,5 @@
 import { VOICES as FAST_VOICES, voiceById as fastById, synthesize as fastSynthesize, isDownloaded, removeVoice, splitText, encodeWav } from './engine.js';
-import { HQ_LANGUAGES, DEFAULT_VOICE, PRESETS, hqSupport, hqSynthesize, hqForget } from './hq.js';
+import { HQ_LANGUAGES, DEFAULT_VOICE, PRESETS, hqSupport, hqSynthesize, hqForget, getServer, setServer, serverActive, serverCheck } from './hq.js';
 import { decodeToMono, tidyClip, Recorder } from './audio.js';
 import * as store from './store.js';
 
@@ -50,6 +50,53 @@ for (const [code, label] of HQ_LANGUAGES) {
 els.language.value = hqLang;
 els.language.addEventListener('change', () => { hqLang = els.language.value; savePrefs(); renderCompose(); });
 // Samples play in the selected speaking language.
+
+// ---------- where the high-quality engine runs ----------
+const runEls = {
+  btns: document.querySelectorAll('.seg-btn'), hint: document.getElementById('runHint'), form: document.getElementById('serverForm'),
+  pass: document.getElementById('serverPass'), connect: document.getElementById('serverConnect'), status: document.getElementById('serverStatus'),
+};
+function renderRun() {
+  const srv = getServer();
+  const mode = srv.enabled ? 'server' : 'device';
+  runEls.btns.forEach((b) => b.setAttribute('aria-checked', String(b.dataset.run === mode)));
+  runEls.form.hidden = mode !== 'server';
+  runEls.hint.textContent = mode === 'server'
+    ? 'السيرفر: يشتغل على أي جهاز حتى الجوال. أول طلب بعد فترة توقف ياخذ حتى دقيقة.'
+    : 'جهازي: يحتاج كمبيوتر فيه كرت شاشة، وأول مرة ينزّل 1.5 جيجا.';
+  if (mode === 'server' && srv.password && !runEls.status.textContent) {
+    runEls.status.textContent = '✓ متصل'; runEls.status.className = 'small ok';
+  }
+}
+function setStatus(text, kind) { runEls.status.textContent = text; runEls.status.className = `small ${kind || ''}`; }
+runEls.btns.forEach((b) => b.addEventListener('click', async () => {
+  if (busy) return;
+  if (b.dataset.run === 'device') { setServer({ enabled: false }); setStatus(''); }
+  else { setServer({ enabled: true }); if (!getServer().password) { setStatus(''); runEls.pass.focus(); } }
+  support = await hqSupport();
+  renderRun(); renderAll();
+}));
+runEls.form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pw = runEls.pass.value.trim() || getServer().password;
+  if (!pw) { setStatus('اكتب كلمة المرور.', 'bad'); return; }
+  runEls.connect.disabled = true;
+  setStatus('أتصل بالسيرفر وأشغّله... ممكن ياخذ حتى دقيقة أول مرة.', '');
+  try {
+    await serverCheck(pw);
+    setServer({ enabled: true, password: pw });
+    runEls.pass.value = '';
+    setStatus('✓ متصل. السيرفر جاهز.', 'ok');
+    if (!isHqId(selectedId)) { selectedId = PRESETS[0].id; savePrefs(); }
+  } catch (err) {
+    setServer({ password: '' });
+    setStatus(friendlyError(err), 'bad');
+  } finally {
+    runEls.connect.disabled = false;
+    support = await hqSupport();
+    renderAll();
+  }
+});
 
 // ---------- tabs ----------
 function setTab(t) {
@@ -113,7 +160,7 @@ const SAMPLE_LINES = {
   other: 'Hello, this is my voice. I can read any text you like.',
 };
 async function sampleCache() { try { return await caches.open('sawt-samples-v1'); } catch { return null; } }
-const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(id)}/${lang}`;
+const sampleKey = (id, lang) => `https://sawt.local/sample/${encodeURIComponent(id)}/${lang}${isHqId(id) && serverActive() ? '/srv' : ''}`;
 
 async function previewVoice(id, btn) {
   if (busy) return;
@@ -239,6 +286,9 @@ function showProgress(p) {
     const pct = p.total ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0;
     els.bar.style.width = `${pct}%`;
     els.progressText.textContent = `تنزيل المحرك لأول مرة... ${pct}% (${mb(p.loaded)} من ${mb(p.total)} ميجا). المرات الجاية ما يحتاج تنزيل.`;
+  } else if (p.stage === 'server') {
+    els.bar.style.width = '60%';
+    els.progressText.textContent = 'السيرفر يولّد الصوت... (إذا كان طافي، يشتغل خلال دقيقة تقريباً)';
   } else if (p.stage === 'retry') {
     els.progressText.textContent = `انقطع الاتصال، أعيد المحاولة (${p.attempt})... التنزيل يكمل من نفس النقطة.`;
   } else if (p.stage === 'voice-download') {
@@ -262,6 +312,10 @@ function friendlyError(e) {
   if (/Failed to fetch|NetworkError|network error|تعذّر تنزيل|Could not locate file/i.test(m)) return 'انقطع التنزيل. اضغط «ولّد الصوت» مرة ثانية، والملفات اللي تنزّلت ما تتنزّل من جديد.';
   if (/QuotaExceeded|quota/i.test(m)) return 'مساحة المتصفح ممتلئة. احذف أصوات ما تستخدمها.';
   if (/webgpu|GPU|adapter/i.test(m)) return 'تعذّر تشغيل كرت الشاشة. جرّب Chrome أو Edge، أو استخدم الأصوات السريعة.';
+  if (/SERVER_BAD_PASSWORD/.test(m)) return 'كلمة مرور السيرفر غلط. اكتبها مثل ما حطيتها في SAWTI_PASSWORD بالضبط.';
+  if (/SERVER_UNREACHABLE/.test(m)) return 'ما قدرت أوصل للسيرفر. تأكد إنه انرفع على Modal، وإن عندك إنترنت، وجرّب مرة ثانية.';
+  if (/SERVER_TOO_LONG/.test(m)) return 'النص طويل على السيرفر. قسّمه لأجزاء أقصر من 6,000 حرف.';
+  if (/SERVER_ERROR/.test(m)) return 'صار خطأ في السيرفر (' + m.replace('SERVER_ERROR ', '') + '). جرّب مرة ثانية بعد شوي.';
   if (/SHORT_OUTPUT/.test(m)) return 'المحرك طلع صوت ناقص. جرّب مرة ثانية، أو جرّب صوت ثاني، وإذا تكرر صوّر لي الرسالة: ' + m;
   if (/memory|OOM|allocation/i.test(m)) return 'ذاكرة الجهاز ما كفت. سكّر التبويبات الثانية وجرّب، أو قسّم النص.';
   return m;
@@ -455,6 +509,7 @@ async function start() {
   updateCount();
   myVoices = await store.listVoices();
   if (!anyVoice(selectedId)) selectedId = DEFAULT_VOICE.id;
+  renderRun();
   support = await hqSupport();
   // On devices without WebGPU, default to the fast engine.
   if (!support.ok && isHqId(selectedId) && !prefs.voiceId) { selectedId = FAST_VOICES[0].id; tab = 'fast'; }

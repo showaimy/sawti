@@ -1,0 +1,61 @@
+name: Deploy voice server to Modal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-server.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check secrets are set
+        env:
+          SAWTI_PASSWORD: ${{ secrets.SAWTI_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$MODAL_TOKEN_ID" ] && missing="$missing MODAL_TOKEN_ID"
+          [ -z "$MODAL_TOKEN_SECRET" ] && missing="$missing MODAL_TOKEN_SECRET"
+          [ -z "$SAWTI_PASSWORD" ] && missing="$missing SAWTI_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
+      - name: Install Modal
+        run: pip install "modal>=1.0,<2"
+
+      - name: Store the site password in Modal
+        env:
+          SAWTI_PASSWORD: ${{ secrets.SAWTI_PASSWORD }}
+        run: modal secret create sawti-auth SAWTI_PASSWORD="$SAWTI_PASSWORD" --force
+
+      - name: Deploy
+        run: modal deploy server/app.py
+
+      - name: Health check
+        run: |
+          url="https://${{ github.repository_owner }}--sawti.modal.run/health"
+          echo "Server URL: https://${{ github.repository_owner }}--sawti.modal.run"
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 20 "$url"; then echo; echo "Server is up"; exit 0; fi
+            sleep 10
+          done
+          echo "::warning::Deployed, but /health did not answer yet (first start can take a few minutes)."

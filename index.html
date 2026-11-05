@@ -9,8 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <script type="module" crossorigin src="./assets/index-1f0Iga7O.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-C0R78nVq.css">
+  <script type="module" crossorigin src="./assets/index-XAyG2_kl.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-BNpMnQW2.css">
 </head>
 <body>
   <header class="top">
@@ -81,7 +81,23 @@
       </div>
 
       <div id="paneHq" role="tabpanel" aria-labelledby="tabHq">
-        <p class="note" id="hqNote">تتكلم 23 لغة منها العربي، وتقدر تضيف صوتك. تحتاج كمبيوتر فيه كرت شاشة.</p>
+        <p class="note" id="hqNote">تتكلم 23 لغة منها العربي، وتقدر تضيف صوتك.</p>
+        <div class="server-box">
+          <span class="label">مكان التشغيل</span>
+          <div class="seg" role="radiogroup" aria-label="مكان التشغيل">
+            <button type="button" role="radio" class="seg-btn" data-run="device" aria-checked="true">جهازي</button>
+            <button type="button" role="radio" class="seg-btn" data-run="server" aria-checked="false">السيرفر</button>
+          </div>
+          <p class="muted small" id="runHint">جهازي: يحتاج كمبيوتر فيه كرت شاشة، وأول مرة ينزّل 1.5 جيجا.</p>
+          <form class="server-form" id="serverForm" hidden novalidate>
+            <label class="label" for="serverPass">كلمة مرور السيرفر</label>
+            <div class="row gap nowrap">
+              <input type="password" id="serverPass" autocomplete="current-password" placeholder="SAWTI_PASSWORD" />
+              <button type="submit" class="secondary" id="serverConnect">اتصال</button>
+            </div>
+            <p class="small" id="serverStatus" aria-live="polite"></p>
+          </form>
+        </div>
         <p class="warn" id="hqWarn" hidden></p>
         <ul class="voice-list" id="hqList" role="radiogroup" aria-label="الأصوات عالية الجودة"></ul>
         <button type="button" class="secondary full" id="addVoiceBtn">+ أضف صوتك</button>
