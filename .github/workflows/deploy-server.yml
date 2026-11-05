@@ -61,8 +61,9 @@ jobs:
 
       - name: Health check
         run: |
-          url="https://${{ github.repository_owner }}--sawti.modal.run/health"
-          echo "Server URL: https://${{ github.repository_owner }}--sawti.modal.run"
+          base="https://${{ github.repository_owner }}--sawti.us-east.modal.run"
+          url="$base/health"
+          echo "Server URL: $base"
           for i in $(seq 1 30); do
             if curl -fsS --max-time 20 "$url"; then echo; echo "Server is up"; exit 0; fi
             sleep 10

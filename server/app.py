@@ -13,7 +13,7 @@ Endpoints (all except /health need the header  Authorization: Bearer <SAWTI_PASS
        Without ref_audio the model's built-in voice is used.
 
 Deploy:  modal deploy server/app.py   (GitHub Actions does this on every push to server/)
-URL:     https://<workspace>--sawti.modal.run
+URL:     https://<workspace>--sawti.<region>.modal.run  (shown by modal deploy)
 """
 
 import modal

@@ -5722,7 +5722,7 @@ async function loadPresetAudio(p, onProgress) {
   presetAudio.set(p.id, clip2);
   return clip2;
 }
-const SERVER_URL = "https://showaimy--sawti.modal.run";
+const SERVER_URL = "https://showaimy--sawti.us-east.modal.run";
 const server = { enabled: false, password: "" };
 try {
   Object.assign(server, JSON.parse(localStorage.getItem("sawt.server") || "{}"));

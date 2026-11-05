@@ -17,4 +17,4 @@
 يحتاج ثلاثة أسرار في إعدادات المستودع (Settings > Secrets and variables > Actions):
 `MODAL_TOKEN_ID` و`MODAL_TOKEN_SECRET` و`SAWTI_PASSWORD`.
 
-رابط السيرفر: `https://showaimy--sawti.modal.run`. في الموقع اختر «عالية الجودة»، ثم «السيرفر»، واكتب كلمة المرور.
+رابط السيرفر: `https://showaimy--sawti.us-east.modal.run`. في الموقع اختر «عالية الجودة»، ثم «السيرفر»، واكتب كلمة المرور.

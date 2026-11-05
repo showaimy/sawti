@@ -39,7 +39,7 @@ async function loadPresetAudio(p, onProgress) {
 }
 
 // ---------- remote server (Modal) ----------
-export const SERVER_URL = 'https://showaimy--sawti.modal.run';
+export const SERVER_URL = 'https://showaimy--sawti.us-east.modal.run';
 const server = { enabled: false, password: '' };
 try { Object.assign(server, JSON.parse(localStorage.getItem('sawt.server') || '{}')); } catch { /* ignore */ }
 export function getServer() { return { ...server }; }
