@@ -6,7 +6,7 @@ shuts down when idle, so it only spends credits while generating.
 
 Auth: every endpoint except /health needs  Authorization: Bearer <encodeURIComponent(SAWTI_PASSWORD)>
 
-  GET  /health   -> {"ok": true}
+  GET  /health   -> {"ok": true, "engines": {"saudi": true}}
   GET  /check    -> {"ok": true, "languages": [...], "presets": [...]}
   POST /voice    -> {"voice_key": "u-..."}      body: {"ref_audio": "<base64 wav/mp3/m4a>"}
                     Stores a custom voice once (kept across restarts), so later requests send only the key.
@@ -360,7 +360,8 @@ class TTS:
 
         @api.get("/health")
         def health():
-            return {"ok": True}
+            # no secrets here: only whether the Saudi-dialect model loaded, so a deploy can be checked
+            return {"ok": True, "engines": {"saudi": self.t3_saudi is not None}}
 
         @api.get("/check")
         def check(authorization: str = Header(default="")):
